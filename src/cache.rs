@@ -10,18 +10,37 @@ use std::path::Path;
 
 const CACHE_FILE: &str = "kalshi_team_cache.json";
 
+/// Team cache format enum for backward compatibility
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum TeamCacheFormat {
+    /// V2: Current format with explicit forward/reverse (reverse is rebuilt)
+    V2 {
+        #[serde(deserialize_with = "deserialize_boxed_map")]
+        forward: HashMap<Box<str>, Box<str>>,
+    },
+    /// V1: Legacy format with top-level "mappings" field
+    V1 {
+        #[serde(deserialize_with = "deserialize_boxed_map")]
+        mappings: HashMap<Box<str>, Box<str>>,
+    },
+}
+
 /// Team code cache - bidirectional mapping between Poly and Kalshi team codes
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct TeamCache {
     /// Forward: "league:poly_code" -> "kalshi_code"
-    #[serde(serialize_with = "serialize_boxed_map", deserialize_with = "deserialize_boxed_map")]
+    #[serde(serialize_with = "serialize_boxed_map")]
     forward: HashMap<Box<str>, Box<str>>,
     /// Reverse: "league:kalshi_code" -> "poly_code"
     #[serde(skip)]
     reverse: HashMap<Box<str>, Box<str>>,
 }
 
-fn serialize_boxed_map<S>(map: &HashMap<Box<str>, Box<str>>, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_boxed_map<S>(
+    map: &HashMap<Box<str>, Box<str>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
@@ -55,10 +74,27 @@ impl TeamCache {
     pub fn load_from<P: AsRef<Path>>(path: P) -> Self {
         let mut cache = match std::fs::read_to_string(path.as_ref()) {
             Ok(contents) => {
-                serde_json::from_str(&contents).unwrap_or_else(|e| {
-                    tracing::warn!("Failed to parse team cache: {}", e);
-                    Self::default()
-                })
+                // Try to parse as either V2 or V1 format
+                match serde_json::from_str::<TeamCacheFormat>(&contents) {
+                    Ok(TeamCacheFormat::V2 { forward }) => {
+                        tracing::debug!("Loaded team cache (v2 format)");
+                        Self {
+                            forward,
+                            reverse: HashMap::new(),
+                        }
+                    }
+                    Ok(TeamCacheFormat::V1 { mappings }) => {
+                        tracing::debug!("Loaded team cache (v1 legacy format), migrating to v2");
+                        Self {
+                            forward: mappings,
+                            reverse: HashMap::new(),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse team cache: {}", e);
+                        Self::default()
+                    }
+                }
             }
             Err(_) => {
                 tracing::info!("No team cache found at {:?}, starting empty", path.as_ref());
@@ -143,15 +179,130 @@ impl TeamCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_cache_lookup() {
         let mut cache = TeamCache::default();
         cache.insert("epl", "che", "cfc");
         cache.insert("epl", "mun", "mun");
-        
+
         assert_eq!(cache.poly_to_kalshi("epl", "che"), Some("cfc".to_string()));
         assert_eq!(cache.poly_to_kalshi("epl", "CHE"), Some("cfc".to_string()));
         assert_eq!(cache.kalshi_to_poly("epl", "cfc"), Some("che".to_string()));
+    }
+
+    #[test]
+    fn test_load_v2_format() {
+        // V2 format: {"forward": {...}}
+        let v2_json = r#"{
+            "forward": {
+                "epl:che": "cfc",
+                "epl:mun": "mun",
+                "nba:lal": "lal"
+            }
+        }"#;
+
+        let test_file = ".test_cache_v2.json";
+        std::fs::write(test_file, v2_json).unwrap();
+
+        let cache = TeamCache::load_from(test_file);
+
+        // Clean up
+        let _ = std::fs::remove_file(test_file);
+
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.poly_to_kalshi("epl", "che"), Some("cfc".to_string()));
+        assert_eq!(cache.poly_to_kalshi("epl", "mun"), Some("mun".to_string()));
+        assert_eq!(cache.poly_to_kalshi("nba", "lal"), Some("lal".to_string()));
+
+        // Verify reverse lookup works (should be rebuilt)
+        assert_eq!(cache.kalshi_to_poly("epl", "cfc"), Some("che".to_string()));
+    }
+
+    #[test]
+    fn test_load_v1_legacy_format() {
+        // V1 legacy format: {"mappings": {...}}
+        let v1_json = r#"{
+            "mappings": {
+                "epl:che": "cfc",
+                "epl:ars": "ars",
+                "bun:bay": "bmu"
+            }
+        }"#;
+
+        let test_file = ".test_cache_v1.json";
+        std::fs::write(test_file, v1_json).unwrap();
+
+        let cache = TeamCache::load_from(test_file);
+
+        // Clean up
+        let _ = std::fs::remove_file(test_file);
+
+        // Should load legacy format and migrate to v2
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.poly_to_kalshi("epl", "che"), Some("cfc".to_string()));
+        assert_eq!(cache.poly_to_kalshi("epl", "ars"), Some("ars".to_string()));
+        assert_eq!(cache.poly_to_kalshi("bun", "bay"), Some("bmu".to_string()));
+
+        // Verify reverse lookup works (should be rebuilt from forward mappings)
+        assert_eq!(cache.kalshi_to_poly("epl", "cfc"), Some("che".to_string()));
+        assert_eq!(cache.kalshi_to_poly("epl", "ars"), Some("ars".to_string()));
+        assert_eq!(cache.kalshi_to_poly("bun", "bmu"), Some("bay".to_string()));
+    }
+
+    #[test]
+    fn test_save_creates_v2_format() {
+        let mut cache = TeamCache::default();
+        cache.insert("epl", "che", "cfc");
+        cache.insert("nba", "lal", "lal");
+
+        let test_file = ".test_cache_save.json";
+        cache.save_to(test_file).unwrap();
+
+        // Read back and verify it's in v2 format
+        let contents = std::fs::read_to_string(test_file).unwrap();
+        assert!(contents.contains("\"forward\""));
+        assert!(!contents.contains("\"mappings\""));
+
+        // Verify it can be loaded back
+        let loaded = TeamCache::load_from(test_file);
+
+        // Clean up
+        let _ = std::fs::remove_file(test_file);
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.poly_to_kalshi("epl", "che"), Some("cfc".to_string()));
+    }
+
+    #[test]
+    fn test_reverse_rebuild_with_collisions() {
+        // Test case where multiple poly codes map to same kalshi code
+        let v1_json = r#"{
+            "mappings": {
+                "epl:che": "cfc",
+                "epl:chelsea": "cfc"
+            }
+        }"#;
+
+        let test_file = ".test_cache_collision.json";
+        std::fs::write(test_file, v1_json).unwrap();
+
+        let cache = TeamCache::load_from(test_file);
+
+        // Clean up
+        let _ = std::fs::remove_file(test_file);
+
+        // Both forward lookups should work
+        assert_eq!(cache.poly_to_kalshi("epl", "che"), Some("cfc".to_string()));
+        assert_eq!(
+            cache.poly_to_kalshi("epl", "chelsea"),
+            Some("cfc".to_string())
+        );
+
+        // Reverse lookup will have one of them (whichever was processed last)
+        let reverse = cache.kalshi_to_poly("epl", "cfc");
+        assert!(reverse.is_some());
+        let val = reverse.unwrap();
+        assert!(val == "che" || val == "chelsea");
     }
 }
