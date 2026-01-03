@@ -114,7 +114,12 @@ pub fn kalshi_fee_total_cents(price_cents: u16, contracts: u32, role: KalshiRole
 /// # Returns
 /// Total fee in cents
 #[inline]
-pub fn poly_fee_total_cents(premium_cents: u32, role: PolyRole, maker_bps: u16, taker_bps: u16) -> u32 {
+pub fn poly_fee_total_cents(
+    premium_cents: u32,
+    role: PolyRole,
+    maker_bps: u16,
+    taker_bps: u16,
+) -> u32 {
     let bps = match role {
         PolyRole::Maker => maker_bps,
         PolyRole::Taker => taker_bps,
@@ -175,20 +180,40 @@ pub fn all_in_cost_total_cents(req: &FastExecutionRequest, contracts: u32, cfg: 
     let fees = match req.arb_type {
         ArbType::PolyYesKalshiNo => {
             // Poly YES leg + Kalshi NO leg
-            let poly_fee = poly_fee_total_cents(yes_premium, cfg.poly_role, cfg.poly_maker_bps, cfg.poly_taker_bps);
+            let poly_fee = poly_fee_total_cents(
+                yes_premium,
+                cfg.poly_role,
+                cfg.poly_maker_bps,
+                cfg.poly_taker_bps,
+            );
             let kalshi_fee = kalshi_fee_total_cents(req.no_price, contracts, cfg.kalshi_role);
             poly_fee + kalshi_fee
         }
         ArbType::KalshiYesPolyNo => {
             // Kalshi YES leg + Poly NO leg
             let kalshi_fee = kalshi_fee_total_cents(req.yes_price, contracts, cfg.kalshi_role);
-            let poly_fee = poly_fee_total_cents(no_premium, cfg.poly_role, cfg.poly_maker_bps, cfg.poly_taker_bps);
+            let poly_fee = poly_fee_total_cents(
+                no_premium,
+                cfg.poly_role,
+                cfg.poly_maker_bps,
+                cfg.poly_taker_bps,
+            );
             kalshi_fee + poly_fee
         }
         ArbType::PolyOnly => {
             // Both legs on Polymarket
-            let yes_fee = poly_fee_total_cents(yes_premium, cfg.poly_role, cfg.poly_maker_bps, cfg.poly_taker_bps);
-            let no_fee = poly_fee_total_cents(no_premium, cfg.poly_role, cfg.poly_maker_bps, cfg.poly_taker_bps);
+            let yes_fee = poly_fee_total_cents(
+                yes_premium,
+                cfg.poly_role,
+                cfg.poly_maker_bps,
+                cfg.poly_taker_bps,
+            );
+            let no_fee = poly_fee_total_cents(
+                no_premium,
+                cfg.poly_role,
+                cfg.poly_maker_bps,
+                cfg.poly_taker_bps,
+            );
             yes_fee + no_fee
         }
         ArbType::KalshiOnly => {
@@ -218,7 +243,11 @@ pub fn all_in_cost_total_cents(req: &FastExecutionRequest, contracts: u32, cfg: 
 /// # Returns
 /// Expected profit in cents (can be negative)
 #[inline]
-pub fn expected_profit_total_cents(req: &FastExecutionRequest, contracts: u32, cfg: &AllInCfg) -> i32 {
+pub fn expected_profit_total_cents(
+    req: &FastExecutionRequest,
+    contracts: u32,
+    cfg: &AllInCfg,
+) -> i32 {
     let payout = 100 * contracts;
     let cost = all_in_cost_total_cents(req, contracts, cfg);
     payout as i32 - cost as i32
@@ -318,7 +347,9 @@ mod tests {
             assert!(
                 maker <= taker,
                 "Maker fee {} should be <= taker fee {} at price {}",
-                maker, taker, p
+                maker,
+                taker,
+                p
             );
         }
     }
@@ -354,7 +385,10 @@ mod tests {
         // Total should be 18, not 20
         assert_eq!(total, 18);
         assert_eq!(per_contract, 2);
-        assert!(total < per_contract * 10, "Total fee should avoid per-contract rounding errors");
+        assert!(
+            total < per_contract * 10,
+            "Total fee should avoid per-contract rounding errors"
+        );
     }
 
     #[test]
@@ -508,7 +542,10 @@ mod tests {
             ..Default::default()
         };
         let profit = expected_profit_total_cents(&req, 1, &cfg);
-        assert_eq!(profit, -10, "Profit should be negative for unprofitable trade");
+        assert_eq!(
+            profit, -10,
+            "Profit should be negative for unprofitable trade"
+        );
     }
 
     #[test]

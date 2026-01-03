@@ -13,15 +13,14 @@ use tracing::{error, info, warn};
 use crate::circuit_breaker::CircuitBreaker;
 use crate::config::{execution_threshold_cents, min_profit_cents};
 use crate::cost::{analyze_all_in, AllInCfg};
+use crate::fees::{Exchange, FeeModel};
 use crate::kalshi::KalshiApiClient;
 use crate::mismatch::handle_mismatch;
 use crate::pnl::{ContractSide, PnLTracker, Side as PnLSide, Venue};
 use crate::polymarket_clob::SharedAsyncClient;
 use crate::position_tracker::{FillRecord, PositionChannel};
 use crate::risk::{size_for_trade, BankrollConfig, SizingConfig};
-use crate::types::{
-    cents_to_price, kalshi_fee_cents, ArbType, FastExecutionRequest, GlobalState, MarketPair,
-};
+use crate::types::{cents_to_price, ArbType, FastExecutionRequest, GlobalState, MarketPair};
 
 // =============================================================================
 // EXECUTION ENGINE
@@ -59,6 +58,7 @@ pub struct ExecutionEngine {
     circuit_breaker: Arc<CircuitBreaker>,
     position_channel: PositionChannel,
     pnl_tracker: Arc<Mutex<PnLTracker>>,
+    fee_model: Arc<FeeModel>,
     in_flight: Arc<[AtomicU64; 8]>,
     clock: NanoClock,
     pub dry_run: bool,
@@ -73,6 +73,7 @@ impl ExecutionEngine {
         circuit_breaker: Arc<CircuitBreaker>,
         position_channel: PositionChannel,
         pnl_tracker: Arc<Mutex<PnLTracker>>,
+        fee_model: Arc<FeeModel>,
         dry_run: bool,
     ) -> Self {
         let test_mode = std::env::var("TEST_ARB")
@@ -86,6 +87,7 @@ impl ExecutionEngine {
             circuit_breaker,
             position_channel,
             pnl_tracker,
+            fee_model,
             in_flight: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
             clock: NanoClock::new(),
             dry_run,
@@ -205,7 +207,13 @@ impl ExecutionEngine {
         let all_in_cfg = AllInCfg::from_env();
         let exec_threshold = execution_threshold_cents();
         let min_profit = min_profit_cents();
-        let analysis = analyze_all_in(&req, max_contracts as u32, &all_in_cfg, exec_threshold, min_profit);
+        let analysis = analyze_all_in(
+            &req,
+            max_contracts as u32,
+            &all_in_cfg,
+            exec_threshold,
+            min_profit,
+        );
 
         if !analysis.passes_threshold || !analysis.passes_min_profit {
             // Structured rejection event with full cost breakdown
@@ -417,27 +425,75 @@ impl ExecutionEngine {
                         "Execution result"
                     );
 
-                    // Calculate fees for P&L tracking
-                    // Kalshi fee is based on price; Polymarket has no trading fee (only gas)
+                    // Calculate fees for P&L tracking using FeeModel
                     let (fee1, fee2) = match req.arb_type {
                         ArbType::PolyYesKalshiNo => {
-                            // Leg 1: Poly YES (no fee), Leg 2: Kalshi NO (fee)
-                            (0i64, kalshi_fee_cents(req.no_price) as i64 * matched)
+                            // Leg 1: Poly YES, Leg 2: Kalshi NO
+                            let poly_fee = self
+                                .fee_model
+                                .estimate_fees(
+                                    Exchange::Polymarket,
+                                    &pair.poly_yes_token,
+                                    req.yes_price,
+                                    matched as u32,
+                                )
+                                .await as i64;
+                            let kalshi_fee = self
+                                .fee_model
+                                .estimate_fees(Exchange::Kalshi, "", req.no_price, matched as u32)
+                                .await as i64;
+                            (poly_fee, kalshi_fee)
                         }
                         ArbType::KalshiYesPolyNo => {
-                            // Leg 1: Kalshi YES (fee), Leg 2: Poly NO (no fee)
-                            (kalshi_fee_cents(req.yes_price) as i64 * matched, 0i64)
+                            // Leg 1: Kalshi YES, Leg 2: Poly NO
+                            let kalshi_fee = self
+                                .fee_model
+                                .estimate_fees(Exchange::Kalshi, "", req.yes_price, matched as u32)
+                                .await as i64;
+                            let poly_fee = self
+                                .fee_model
+                                .estimate_fees(
+                                    Exchange::Polymarket,
+                                    &pair.poly_no_token,
+                                    req.no_price,
+                                    matched as u32,
+                                )
+                                .await as i64;
+                            (kalshi_fee, poly_fee)
                         }
                         ArbType::PolyOnly => {
-                            // Both legs on Polymarket (no fees)
-                            (0i64, 0i64)
+                            // Both legs on Polymarket
+                            let yes_fee = self
+                                .fee_model
+                                .estimate_fees(
+                                    Exchange::Polymarket,
+                                    &pair.poly_yes_token,
+                                    req.yes_price,
+                                    matched as u32,
+                                )
+                                .await as i64;
+                            let no_fee = self
+                                .fee_model
+                                .estimate_fees(
+                                    Exchange::Polymarket,
+                                    &pair.poly_no_token,
+                                    req.no_price,
+                                    matched as u32,
+                                )
+                                .await as i64;
+                            (yes_fee, no_fee)
                         }
                         ArbType::KalshiOnly => {
-                            // Both legs on Kalshi (both have fees)
-                            (
-                                kalshi_fee_cents(req.yes_price) as i64 * matched,
-                                kalshi_fee_cents(req.no_price) as i64 * matched,
-                            )
+                            // Both legs on Kalshi
+                            let yes_fee = self
+                                .fee_model
+                                .estimate_fees(Exchange::Kalshi, "", req.yes_price, matched as u32)
+                                .await as i64;
+                            let no_fee = self
+                                .fee_model
+                                .estimate_fees(Exchange::Kalshi, "", req.no_price, matched as u32)
+                                .await as i64;
+                            (yes_fee, no_fee)
                         }
                     };
 
@@ -508,7 +564,7 @@ impl ExecutionEngine {
                             contract_side1,
                             matched,
                             price1_cents,
-                            fee1 / matched.max(1), // fee per contract
+                            fee1, // total fee for the fill
                         );
 
                         // Structured P&L fill event
@@ -520,7 +576,7 @@ impl ExecutionEngine {
                             contract_side = ?contract_side1,
                             qty = matched,
                             price_cents = price1_cents,
-                            fee_cents = fee1 / matched.max(1),
+                            fee_cents = fee1,
                             order_id = %yes_order_id,
                             "P&L fill recorded"
                         );
@@ -533,7 +589,7 @@ impl ExecutionEngine {
                             contract_side2,
                             matched,
                             price2_cents,
-                            fee2 / matched.max(1), // fee per contract
+                            fee2, // total fee for the fill
                         );
 
                         // Structured P&L fill event
@@ -545,7 +601,7 @@ impl ExecutionEngine {
                             contract_side = ?contract_side2,
                             qty = matched,
                             price_cents = price2_cents,
-                            fee_cents = fee2 / matched.max(1),
+                            fee_cents = fee2,
                             order_id = %no_order_id,
                             "P&L fill recorded"
                         );

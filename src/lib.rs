@@ -9,6 +9,9 @@ pub mod config;
 pub mod cost;
 pub mod discovery;
 pub mod execution;
+#[cfg(test)]
+mod execution_tests;
+pub mod fees;
 pub mod kalshi;
 pub mod logging;
 pub mod mismatch;

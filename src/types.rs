@@ -956,24 +956,42 @@ mod tests {
         // Without guard, this could create fake negative costs.
         // Guard should reject and return 0.
         let state = make_market_state_raw(
-            u16::MAX, 40, 1000, 1000, // Kalshi: YES=u16::MAX (invalid), NO=40
-            40, 40, 1000, 1000, // Poly: YES=40, NO=40
+            u16::MAX,
+            40,
+            1000,
+            1000, // Kalshi: YES=u16::MAX (invalid), NO=40
+            40,
+            40,
+            1000,
+            1000, // Poly: YES=40, NO=40
         );
 
         let mask = state.check_arbs(100);
-        assert_eq!(mask, 0, "Should return 0 when Kalshi YES price is u16::MAX sentinel");
+        assert_eq!(
+            mask, 0,
+            "Should return 0 when Kalshi YES price is u16::MAX sentinel"
+        );
     }
 
     #[test]
     fn test_check_arbs_sentinel_u16_max_poly() {
         // Test sentinel on Polymarket side
         let state = make_market_state_raw(
-            40, 40, 1000, 1000, // Kalshi: valid
-            u16::MAX, 40, 1000, 1000, // Poly: YES=u16::MAX (invalid)
+            40,
+            40,
+            1000,
+            1000, // Kalshi: valid
+            u16::MAX,
+            40,
+            1000,
+            1000, // Poly: YES=u16::MAX (invalid)
         );
 
         let mask = state.check_arbs(100);
-        assert_eq!(mask, 0, "Should return 0 when Poly YES price is u16::MAX sentinel");
+        assert_eq!(
+            mask, 0,
+            "Should return 0 when Poly YES price is u16::MAX sentinel"
+        );
     }
 
     #[test]
@@ -986,7 +1004,10 @@ mod tests {
         );
 
         let mask = state.check_arbs(100);
-        assert_eq!(mask, 0, "Should return 0 when price is 100 (out of valid range)");
+        assert_eq!(
+            mask, 0,
+            "Should return 0 when price is 100 (out of valid range)"
+        );
     }
 
     #[test]
@@ -998,7 +1019,10 @@ mod tests {
         );
 
         let mask = state.check_arbs(100);
-        assert_eq!(mask, 0, "Should return 0 when price is 200 (out of valid range)");
+        assert_eq!(
+            mask, 0,
+            "Should return 0 when price is 200 (out of valid range)"
+        );
     }
 
     #[test]
@@ -1031,12 +1055,21 @@ mod tests {
         // u16::MAX = 65535, as i16 = -1.
         // If unchecked: cost = p_yes + k_no + fee = 40 + (-1) + 0 = 39 < 100 = FAKE PROFITABLE!
         let state = make_market_state_raw(
-            u16::MAX, u16::MAX, 1000, 1000, // Both Kalshi prices invalid
-            40, 40, 1000, 1000, // Poly: valid
+            u16::MAX,
+            u16::MAX,
+            1000,
+            1000, // Both Kalshi prices invalid
+            40,
+            40,
+            1000,
+            1000, // Poly: valid
         );
 
         let mask = state.check_arbs(100);
-        assert_eq!(mask, 0, "Guard must prevent i16 wrap attack from producing fake arb");
+        assert_eq!(
+            mask, 0,
+            "Guard must prevent i16 wrap attack from producing fake arb"
+        );
     }
 
     #[test]
@@ -1046,7 +1079,10 @@ mod tests {
         book.store(u16::MAX, 40, 1000, 500);
 
         let (yes_ask, no_ask, yes_size, no_size) = book.load();
-        assert_eq!(yes_ask, NO_PRICE, "Invalid price should be sanitized to NO_PRICE");
+        assert_eq!(
+            yes_ask, NO_PRICE,
+            "Invalid price should be sanitized to NO_PRICE"
+        );
         assert_eq!(yes_size, 0, "Size should be set to 0 when price is invalid");
         assert_eq!(no_ask, 40, "Valid price should be unchanged");
         assert_eq!(no_size, 500, "Valid size should be unchanged");
@@ -1059,8 +1095,14 @@ mod tests {
         book.update_yes(200, 500); // Invalid price
 
         let (yes_ask, no_ask, yes_size, no_size) = book.load();
-        assert_eq!(yes_ask, NO_PRICE, "update_yes should sanitize invalid price");
-        assert_eq!(yes_size, 0, "update_yes should set size to 0 for invalid price");
+        assert_eq!(
+            yes_ask, NO_PRICE,
+            "update_yes should sanitize invalid price"
+        );
+        assert_eq!(
+            yes_size, 0,
+            "update_yes should set size to 0 for invalid price"
+        );
         assert_eq!(no_ask, 50, "NO side should be unchanged");
         assert_eq!(no_size, 1000, "NO size should be unchanged");
     }
@@ -1075,7 +1117,10 @@ mod tests {
         assert_eq!(yes_ask, 50, "YES side should be unchanged");
         assert_eq!(yes_size, 1000, "YES size should be unchanged");
         assert_eq!(no_ask, NO_PRICE, "update_no should sanitize price=100");
-        assert_eq!(no_size, 0, "update_no should set size to 0 for invalid price");
+        assert_eq!(
+            no_size, 0,
+            "update_no should set size to 0 for invalid price"
+        );
     }
 
     #[test]

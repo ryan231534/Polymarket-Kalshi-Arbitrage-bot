@@ -206,7 +206,9 @@ pub fn build_unwind_prices(
         Dir::Short => {
             // Need to BUY: start above ref, go up to panic (99)
             for i in 1..=max_steps {
-                let price = ref_price.saturating_add(step.saturating_mul(i as u16)).min(99);
+                let price = ref_price
+                    .saturating_add(step.saturating_mul(i as u16))
+                    .min(99);
                 if prices.last() != Some(&price) {
                     prices.push(price);
                 }
@@ -223,7 +225,9 @@ pub fn build_unwind_prices(
         Dir::Long => {
             // Need to SELL: start below ref, go down to panic (1)
             for i in 1..=max_steps {
-                let price = ref_price.saturating_sub(step.saturating_mul(i as u16)).max(1);
+                let price = ref_price
+                    .saturating_sub(step.saturating_mul(i as u16))
+                    .max(1);
                 if prices.last() != Some(&price) {
                     prices.push(price);
                 }
@@ -287,13 +291,23 @@ pub async fn unwind_kalshi(
             Dir::Long => {
                 // Sell to flatten
                 kalshi
-                    .sell_ioc(&exposure.market_key, side_str, price as i64, remaining as i64)
+                    .sell_ioc(
+                        &exposure.market_key,
+                        side_str,
+                        price as i64,
+                        remaining as i64,
+                    )
                     .await
             }
             Dir::Short => {
                 // Buy to cover
                 kalshi
-                    .buy_ioc(&exposure.market_key, side_str, price as i64, remaining as i64)
+                    .buy_ioc(
+                        &exposure.market_key,
+                        side_str,
+                        price as i64,
+                        remaining as i64,
+                    )
                     .await
             }
         };
@@ -304,7 +318,7 @@ pub async fn unwind_kalshi(
                 if filled > 0 {
                     let fill_cost = resp.order.taker_fill_cost.unwrap_or(0)
                         + resp.order.maker_fill_cost.unwrap_or(0);
-                    
+
                     // For sells, cost is negative (proceeds)
                     let signed_cost = match exposure.dir {
                         Dir::Long => -(fill_cost as i64), // Selling = proceeds
@@ -429,11 +443,11 @@ pub async fn unwind_poly(
                 let filled = fill.filled_size as u32;
                 if filled > 0 {
                     let fill_cost = (fill.fill_cost * 100.0) as i64;
-                    
+
                     // For sells, cost is negative (proceeds)
                     let signed_cost = match exposure.dir {
                         Dir::Long => -fill_cost, // Selling = proceeds
-                        Dir::Short => fill_cost,  // Buying = cost
+                        Dir::Short => fill_cost, // Buying = cost
                     };
 
                     total_filled += filled;
@@ -637,8 +651,12 @@ pub async fn handle_mismatch(
     let exposure = if yes_filled > no_filled {
         // YES leg overfilled - we're long YES, need to sell YES to flatten
         let (venue, market_key) = match arb_type {
-            ArbType::PolyYesKalshiNo | ArbType::PolyOnly => (Venue::Polymarket, poly_yes_token.to_string()),
-            ArbType::KalshiYesPolyNo | ArbType::KalshiOnly => (Venue::Kalshi, kalshi_ticker.to_string()),
+            ArbType::PolyYesKalshiNo | ArbType::PolyOnly => {
+                (Venue::Polymarket, poly_yes_token.to_string())
+            }
+            ArbType::KalshiYesPolyNo | ArbType::KalshiOnly => {
+                (Venue::Kalshi, kalshi_ticker.to_string())
+            }
         };
         Exposure {
             venue,
@@ -651,8 +669,12 @@ pub async fn handle_mismatch(
     } else {
         // NO leg overfilled - we're long NO, need to sell NO to flatten
         let (venue, market_key) = match arb_type {
-            ArbType::PolyYesKalshiNo | ArbType::KalshiOnly => (Venue::Kalshi, kalshi_ticker.to_string()),
-            ArbType::KalshiYesPolyNo | ArbType::PolyOnly => (Venue::Polymarket, poly_no_token.to_string()),
+            ArbType::PolyYesKalshiNo | ArbType::KalshiOnly => {
+                (Venue::Kalshi, kalshi_ticker.to_string())
+            }
+            ArbType::KalshiYesPolyNo | ArbType::PolyOnly => {
+                (Venue::Polymarket, poly_no_token.to_string())
+            }
         };
         Exposure {
             venue,
@@ -742,16 +764,16 @@ mod tests {
         // Short exposure: need to BUY to cover
         // ref=50, step=2, 5 steps, panic=99
         let prices = build_unwind_prices(Dir::Short, 50, 2, 5, 99);
-        
+
         // Should be: 52, 54, 56, 58, 60, 99
         assert!(prices.len() >= 2, "Should have at least 2 prices");
         assert_eq!(*prices.last().unwrap(), 99, "Must end with panic price 99");
-        
+
         // Check ascending order
         for i in 1..prices.len() {
             assert!(prices[i] >= prices[i - 1], "Buy ladder must be ascending");
         }
-        
+
         // Check no duplicates
         let mut seen = std::collections::HashSet::new();
         for p in &prices {
@@ -763,7 +785,7 @@ mod tests {
     fn test_build_unwind_prices_buy_clamps_to_99() {
         // Start near ceiling
         let prices = build_unwind_prices(Dir::Short, 95, 2, 10, 99);
-        
+
         // All prices should be <= 99
         for p in &prices {
             assert!(*p <= 99, "Price {} exceeds 99", p);
@@ -774,7 +796,11 @@ mod tests {
     #[test]
     fn test_build_unwind_prices_buy_ends_with_panic() {
         let prices = build_unwind_prices(Dir::Short, 50, 1, 3, 99);
-        assert_eq!(*prices.last().unwrap(), 99, "Buy ladder must end with panic=99");
+        assert_eq!(
+            *prices.last().unwrap(),
+            99,
+            "Buy ladder must end with panic=99"
+        );
     }
 
     #[test]
@@ -782,16 +808,16 @@ mod tests {
         // Long exposure: need to SELL to flatten
         // ref=50, step=2, 5 steps, panic=1
         let prices = build_unwind_prices(Dir::Long, 50, 2, 5, 1);
-        
+
         // Should be: 48, 46, 44, 42, 40, 1
         assert!(prices.len() >= 2, "Should have at least 2 prices");
         assert_eq!(*prices.last().unwrap(), 1, "Must end with panic price 1");
-        
+
         // Check descending order
         for i in 1..prices.len() {
             assert!(prices[i] <= prices[i - 1], "Sell ladder must be descending");
         }
-        
+
         // Check no duplicates
         let mut seen = std::collections::HashSet::new();
         for p in &prices {
@@ -803,7 +829,7 @@ mod tests {
     fn test_build_unwind_prices_sell_clamps_to_1() {
         // Start near floor
         let prices = build_unwind_prices(Dir::Long, 5, 2, 10, 1);
-        
+
         // All prices should be >= 1
         for p in &prices {
             assert!(*p >= 1, "Price {} below 1", p);
@@ -814,7 +840,11 @@ mod tests {
     #[test]
     fn test_build_unwind_prices_sell_ends_with_panic() {
         let prices = build_unwind_prices(Dir::Long, 50, 1, 3, 1);
-        assert_eq!(*prices.last().unwrap(), 1, "Sell ladder must end with panic=1");
+        assert_eq!(
+            *prices.last().unwrap(),
+            1,
+            "Sell ladder must end with panic=1"
+        );
     }
 
     #[test]

@@ -28,6 +28,7 @@ mod config;
 mod cost;
 mod discovery;
 mod execution;
+mod fees;
 mod kalshi;
 mod logging;
 mod mismatch;
@@ -46,11 +47,12 @@ use tracing::{error, info, info_span, warn};
 use cache::TeamCache;
 use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use config::{
-    enabled_leagues_from_env, format_threshold_cents, profit_threshold_cents,
+    enabled_leagues_from_env, format_threshold_cents, kalshi_fee_role, profit_threshold_cents,
     threshold_profit_percent, ENABLED_LEAGUES, WS_RECONNECT_DELAY_SECS,
 };
 use discovery::DiscoveryClient;
 use execution::{create_execution_channel, run_execution_loop, ExecutionEngine};
+use fees::{Exchange, FeeModel};
 use kalshi::{KalshiApiClient, KalshiConfig};
 use pnl::PnLTracker;
 use polymarket_clob::{PolymarketAsyncClient, PreparedCreds, SharedAsyncClient};
@@ -241,6 +243,13 @@ async fn main() -> Result<()> {
         pnl_dir, pnl_flush_secs, dry_run
     );
 
+    // Initialize fee model
+    let fee_model = Arc::new(FeeModel::new(kalshi_fee_role()));
+    info!(
+        "💰 Fee model initialized with Kalshi role={:?}",
+        kalshi_fee_role()
+    );
+
     // Note: threshold_cents already initialized at startup (line ~70)
     info!(
         "   Execution threshold: {} (same as profit threshold)",
@@ -254,6 +263,7 @@ async fn main() -> Result<()> {
         circuit_breaker.clone(),
         position_channel,
         pnl_tracker.clone(),
+        fee_model.clone(),
         dry_run,
     ));
 
@@ -428,11 +438,11 @@ async fn main() -> Result<()> {
     let rediscovery_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // 1 hour
         interval.tick().await; // Skip first tick (already did discovery at startup)
-        
+
         loop {
             interval.tick().await;
             info!("🔄 Running periodic market rediscovery...");
-            
+
             // Reload team cache and create fresh Kalshi client for each rediscovery
             let team_cache = TeamCache::load();
             let kalshi_config = match KalshiConfig::from_env() {
@@ -442,23 +452,20 @@ async fn main() -> Result<()> {
                     continue;
                 }
             };
-            
-            let discovery = DiscoveryClient::new(
-                KalshiApiClient::new(kalshi_config),
-                team_cache,
-            );
-            
+
+            let discovery = DiscoveryClient::new(KalshiApiClient::new(kalshi_config), team_cache);
+
             let leagues_refs: Vec<&str> = rediscovery_leagues.iter().map(|s| s.as_str()).collect();
             match discovery.discover_all_force(&leagues_refs).await {
                 result if !result.pairs.is_empty() => {
                     let old_count = rediscovery_state_ref.market_count();
-                    
+
                     info!(
                         "📊 Rediscovery complete: found {} market pairs (previous: {})",
                         result.pairs.len(),
                         old_count
                     );
-                    
+
                     // Log newly discovered markets
                     for pair in &result.pairs {
                         info!(
@@ -466,14 +473,16 @@ async fn main() -> Result<()> {
                             pair.description, pair.market_type, pair.kalshi_market_ticker
                         );
                     }
-                    
+
                     if !result.errors.is_empty() {
                         for err in &result.errors {
                             warn!("   ⚠️ {}", err);
                         }
                     }
-                    
-                    info!("ℹ️  Note: New markets will be picked up automatically after reconnection");
+
+                    info!(
+                        "ℹ️  Note: New markets will be picked up automatically after reconnection"
+                    );
                     info!("ℹ️  To activate new markets now, restart the bot");
                 }
                 result => {
@@ -491,8 +500,8 @@ async fn main() -> Result<()> {
     let heartbeat_threshold = threshold_cents;
     let heartbeat_pnl = pnl_tracker.clone();
     let heartbeat_flush_secs = pnl_flush_secs;
+    let heartbeat_fee_model = fee_model.clone();
     let heartbeat_handle = tokio::spawn(async move {
-        use crate::types::kalshi_fee_cents;
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
@@ -500,8 +509,8 @@ async fn main() -> Result<()> {
             let mut with_kalshi = 0;
             let mut with_poly = 0;
             let mut with_both = 0;
-            // Track best arbitrage opportunity: (total_cost, market_id, p_yes, k_no, k_yes, p_no, fee, is_poly_yes_kalshi_no)
-            let mut best_arb: Option<(u16, u16, u16, u16, u16, u16, u16, bool)> = None;
+            // Track best arbitrage opportunity: (total_cost, market_id, p_yes, k_no, k_yes, p_no, poly_fee, kalshi_fee, is_poly_yes_kalshi_no)
+            let mut best_arb: Option<(u16, u16, u16, u16, u16, u16, u16, u16, bool)> = None;
 
             for market in heartbeat_state.markets.iter().take(market_count) {
                 let (k_yes, k_no, _, _) = market.kalshi.load();
@@ -517,16 +526,36 @@ async fn main() -> Result<()> {
                 if has_k && has_p {
                     with_both += 1;
 
-                    let fee1 = kalshi_fee_cents(k_no);
-                    let cost1 = p_yes + k_no + fee1;
+                    // Get token IDs for fee estimation
+                    let (poly_yes_token, poly_no_token) = market
+                        .pair
+                        .as_ref()
+                        .map(|p| (p.poly_yes_token.as_ref(), p.poly_no_token.as_ref()))
+                        .unwrap_or(("", ""));
 
-                    let fee2 = kalshi_fee_cents(k_yes);
-                    let cost2 = k_yes + fee2 + p_no;
+                    // Calculate fees for both directions (PolyYes+KalshiNo and KalshiYes+PolyNo)
+                    let poly_yes_fee = heartbeat_fee_model
+                        .estimate_fees(Exchange::Polymarket, poly_yes_token, p_yes, 1)
+                        .await as u16;
+                    let kalshi_no_fee = heartbeat_fee_model
+                        .estimate_fees(Exchange::Kalshi, "", k_no, 1)
+                        .await as u16;
 
-                    let (best_cost, best_fee, is_poly_yes) = if cost1 <= cost2 {
-                        (cost1, fee1, true)
+                    let kalshi_yes_fee = heartbeat_fee_model
+                        .estimate_fees(Exchange::Kalshi, "", k_yes, 1)
+                        .await as u16;
+                    let poly_no_fee = heartbeat_fee_model
+                        .estimate_fees(Exchange::Polymarket, poly_no_token, p_no, 1)
+                        .await as u16;
+
+                    // Cost = leg1 + leg2 + fees
+                    let cost1 = p_yes + k_no + poly_yes_fee + kalshi_no_fee;
+                    let cost2 = k_yes + p_no + kalshi_yes_fee + poly_no_fee;
+
+                    let (best_cost, poly_fee, kalshi_fee, is_poly_yes) = if cost1 <= cost2 {
+                        (cost1, poly_yes_fee, kalshi_no_fee, true)
                     } else {
-                        (cost2, fee2, false)
+                        (cost2, poly_no_fee, kalshi_yes_fee, false)
                     };
 
                     if best_arb.is_none() || best_cost < best_arb.as_ref().unwrap().0 {
@@ -537,7 +566,8 @@ async fn main() -> Result<()> {
                             k_no,
                             k_yes,
                             p_no,
-                            best_fee,
+                            poly_fee,
+                            kalshi_fee,
                             is_poly_yes,
                         ));
                     }
@@ -585,7 +615,18 @@ async fn main() -> Result<()> {
                 "Structured heartbeat"
             );
 
-            if let Some((cost, market_id, p_yes, k_no, k_yes, p_no, fee, is_poly_yes)) = best_arb {
+            if let Some((
+                cost,
+                market_id,
+                p_yes,
+                k_no,
+                k_yes,
+                p_no,
+                poly_fee,
+                kalshi_fee,
+                is_poly_yes,
+            )) = best_arb
+            {
                 let gap = cost as i16 - heartbeat_threshold as i16;
                 let desc = heartbeat_state
                     .get_by_id(market_id)
@@ -594,13 +635,13 @@ async fn main() -> Result<()> {
                     .unwrap_or("Unknown");
                 let leg_breakdown = if is_poly_yes {
                     format!(
-                        "P_yes({}¢) + K_no({}¢) + K_fee({}¢) = {}¢",
-                        p_yes, k_no, fee, cost
+                        "P_yes({}¢) + K_no({}¢) + P_fee({}¢) + K_fee({}¢) = {}¢",
+                        p_yes, k_no, poly_fee, kalshi_fee, cost
                     )
                 } else {
                     format!(
-                        "K_yes({}¢) + P_no({}¢) + K_fee({}¢) = {}¢",
-                        k_yes, p_no, fee, cost
+                        "K_yes({}¢) + P_no({}¢) + P_fee({}¢) + K_fee({}¢) = {}¢",
+                        k_yes, p_no, poly_fee, kalshi_fee, cost
                     )
                 };
                 if gap <= 10 {
@@ -620,7 +661,13 @@ async fn main() -> Result<()> {
 
     // Main event loop - run until termination
     info!("✅ All systems operational - entering main event loop");
-    let _ = tokio::join!(kalshi_handle, poly_handle, heartbeat_handle, rediscovery_handle, exec_handle);
+    let _ = tokio::join!(
+        kalshi_handle,
+        poly_handle,
+        heartbeat_handle,
+        rediscovery_handle,
+        exec_handle
+    );
 
     Ok(())
 }
