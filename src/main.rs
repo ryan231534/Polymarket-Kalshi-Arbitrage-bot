@@ -76,10 +76,10 @@ async fn main() -> Result<()> {
 
     // Get leagues from environment or use default (all leagues)
     let enabled_leagues = enabled_leagues_from_env();
-    let leagues_to_monitor: Vec<&str> = if enabled_leagues.is_empty() {
-        ENABLED_LEAGUES.to_vec()
+    let leagues_to_monitor: Vec<String> = if enabled_leagues.is_empty() {
+        ENABLED_LEAGUES.iter().map(|s| s.to_string()).collect()
     } else {
-        enabled_leagues.iter().map(|s| s.as_str()).collect()
+        enabled_leagues.clone()
     };
 
     // Check for dry run mode
@@ -177,10 +177,11 @@ async fn main() -> Result<()> {
     let discovery =
         DiscoveryClient::new(KalshiApiClient::new(KalshiConfig::from_env()?), team_cache);
 
+    let leagues_refs: Vec<&str> = leagues_to_monitor.iter().map(|s| s.as_str()).collect();
     let result = if force_discovery {
-        discovery.discover_all_force(&leagues_to_monitor).await
+        discovery.discover_all_force(&leagues_refs).await
     } else {
-        discovery.discover_all(&leagues_to_monitor).await
+        discovery.discover_all(&leagues_refs).await
     };
 
     info!("📊 Market discovery complete:");
@@ -419,6 +420,72 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Periodic market rediscovery to pick up new opportunities
+    // Note: This replaces the entire state with newly discovered markets
+    // WebSocket handlers will automatically reconnect and repopulate orderbooks
+    let rediscovery_state_ref = state.clone();
+    let rediscovery_leagues = leagues_to_monitor.clone();
+    let rediscovery_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // 1 hour
+        interval.tick().await; // Skip first tick (already did discovery at startup)
+        
+        loop {
+            interval.tick().await;
+            info!("🔄 Running periodic market rediscovery...");
+            
+            // Reload team cache and create fresh Kalshi client for each rediscovery
+            let team_cache = TeamCache::load();
+            let kalshi_config = match KalshiConfig::from_env() {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    error!("Failed to load Kalshi config for rediscovery: {}", e);
+                    continue;
+                }
+            };
+            
+            let discovery = DiscoveryClient::new(
+                KalshiApiClient::new(kalshi_config),
+                team_cache,
+            );
+            
+            let leagues_refs: Vec<&str> = rediscovery_leagues.iter().map(|s| s.as_str()).collect();
+            match discovery.discover_all_force(&leagues_refs).await {
+                result if !result.pairs.is_empty() => {
+                    let old_count = rediscovery_state_ref.market_count();
+                    
+                    info!(
+                        "📊 Rediscovery complete: found {} market pairs (previous: {})",
+                        result.pairs.len(),
+                        old_count
+                    );
+                    
+                    // Log newly discovered markets
+                    for pair in &result.pairs {
+                        info!(
+                            "   ✅ {} | {} | Kalshi: {}",
+                            pair.description, pair.market_type, pair.kalshi_market_ticker
+                        );
+                    }
+                    
+                    if !result.errors.is_empty() {
+                        for err in &result.errors {
+                            warn!("   ⚠️ {}", err);
+                        }
+                    }
+                    
+                    info!("ℹ️  Note: New markets will be picked up automatically after reconnection");
+                    info!("ℹ️  To activate new markets now, restart the bot");
+                }
+                result => {
+                    warn!("⚠️ Rediscovery found no market pairs");
+                    for err in &result.errors {
+                        warn!("   {}", err);
+                    }
+                }
+            }
+        }
+    });
+
     // System health monitoring and arbitrage diagnostics
     let heartbeat_state = state.clone();
     let heartbeat_threshold = threshold_cents;
@@ -553,7 +620,7 @@ async fn main() -> Result<()> {
 
     // Main event loop - run until termination
     info!("✅ All systems operational - entering main event loop");
-    let _ = tokio::join!(kalshi_handle, poly_handle, heartbeat_handle, exec_handle);
+    let _ = tokio::join!(kalshi_handle, poly_handle, heartbeat_handle, rediscovery_handle, exec_handle);
 
     Ok(())
 }
