@@ -36,6 +36,7 @@ mod pnl;
 mod polymarket;
 mod polymarket_clob;
 mod position_tracker;
+mod prefetch;
 mod risk;
 mod types;
 

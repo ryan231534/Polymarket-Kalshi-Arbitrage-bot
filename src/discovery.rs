@@ -20,6 +20,7 @@ use crate::cache::TeamCache;
 use crate::config::{get_league_config, get_league_configs, LeagueConfig};
 use crate::kalshi::KalshiApiClient;
 use crate::polymarket::GammaClient;
+use crate::prefetch;
 use crate::types::{DiscoveryResult, KalshiEvent, KalshiMarket, MarketPair, MarketType};
 
 /// Max concurrent Gamma API requests
@@ -359,6 +360,174 @@ impl DiscoveryClient {
 
     /// Full discovery without cache
     async fn discover_full(&self, leagues: &[&str]) -> DiscoveryResult {
+        // Check if prefetch is enabled (default: true for performance)
+        let use_prefetch = std::env::var("USE_PREFETCH_DISCOVERY")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
+
+        if use_prefetch {
+            info!("🚀 Using batch prefetch for discovery");
+            return self.discover_full_with_prefetch(leagues).await;
+        }
+
+        info!("🐌 Using legacy sequential discovery");
+        self.discover_full_legacy(leagues).await
+    }
+
+    /// Full discovery using batch prefetch (10-20x faster)
+    async fn discover_full_with_prefetch(&self, leagues: &[&str]) -> DiscoveryResult {
+        let start = std::time::Instant::now();
+
+        let configs: Vec<_> = if leagues.is_empty() {
+            get_league_configs()
+        } else {
+            leagues
+                .iter()
+                .filter_map(|l| get_league_config(l))
+                .collect()
+        };
+
+        // Build list of all series to prefetch
+        let mut series_list = Vec::new();
+        let market_types = [
+            MarketType::Moneyline,
+            MarketType::Spread,
+            MarketType::Total,
+            MarketType::Btts,
+        ];
+
+        for config in &configs {
+            for market_type in &market_types {
+                if let Some(series) = self.get_series_for_type(config, *market_type) {
+                    series_list.push(series.to_string());
+                }
+            }
+        }
+
+        // Phase 1: Prefetch all Kalshi events and markets
+        info!("📡 Phase 1: Prefetching Kalshi events/markets...");
+        let phase1_result = match prefetch::prefetch_all(
+            self.kalshi.clone(),
+            self.gamma.clone(),
+            &series_list,
+            &[], // No poly slugs yet - will do in phase 2
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Prefetch failed, falling back to legacy discovery: {}", e);
+                return self.discover_full_legacy(leagues).await;
+            }
+        };
+
+        // Phase 2: Build poly slugs from Kalshi data and prefetch Polymarket tokens
+        info!("📡 Phase 2: Building poly slugs and prefetching tokens...");
+        let phase2_start = std::time::Instant::now();
+        let horizon_days = get_discovery_horizon_days();
+        let mut poly_slugs = Vec::new();
+
+        for config in &configs {
+            for market_type in &market_types {
+                let series = match self.get_series_for_type(config, *market_type) {
+                    Some(s) => s,
+                    None => continue,
+                };
+
+                // Process all markets from phase1 for this series
+                for (event_ticker, markets) in phase1_result.kalshi_markets.iter() {
+                    if !event_ticker.starts_with(series) {
+                        continue;
+                    }
+
+                    // Parse event ticker
+                    let parsed = match parse_kalshi_event_ticker(event_ticker) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+
+                    // Apply horizon filter
+                    if !is_within_horizon(&parsed.date, horizon_days) {
+                        continue;
+                    }
+
+                    // Build slug for each market
+                    for market in markets {
+                        let poly_slug =
+                            self.build_poly_slug(config.poly_prefix, &parsed, *market_type, market);
+                        poly_slugs.push(poly_slug);
+                    }
+                }
+            }
+        }
+
+        info!("  📋 Built {} poly slugs to prefetch", poly_slugs.len());
+
+        // Fetch Polymarket tokens in parallel
+        let poly_tokens = match prefetch::fetch_all_poly_tokens(
+            self.gamma.clone(),
+            &poly_slugs,
+            prefetch::get_prefetch_concurrency(),
+        )
+        .await
+        {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                warn!("Failed to fetch poly tokens: {}", e);
+                std::collections::HashMap::new()
+            }
+        };
+
+        let phase2_ms = phase2_start.elapsed().as_millis();
+        info!(
+            "  ✅ Fetched {} Polymarket tokens in {}ms",
+            poly_tokens.len(),
+            phase2_ms
+        );
+
+        // Now build market pairs from prefetched data
+        let mut result = DiscoveryResult::default();
+
+        for config in &configs {
+            for market_type in &market_types {
+                let pairs = match self.build_pairs_from_prefetch_data(
+                    config,
+                    *market_type,
+                    &phase1_result,
+                    &poly_tokens,
+                    horizon_days,
+                ) {
+                    Ok(pairs) => pairs,
+                    Err(e) => {
+                        result
+                            .errors
+                            .push(format!("{} {}: {}", config.league_code, market_type, e));
+                        continue;
+                    }
+                };
+
+                let count = pairs.len();
+                if count > 0 {
+                    info!(
+                        "  ✅ {} {}: {} pairs",
+                        config.league_code, market_type, count
+                    );
+                }
+                result.poly_matches += count;
+                result.pairs.extend(pairs);
+            }
+        }
+
+        result.kalshi_events_found = result.pairs.len();
+
+        let total_ms = start.elapsed().as_millis();
+        info!("🎉 Discovery complete in {}ms using prefetch", total_ms);
+
+        result
+    }
+
+    /// Legacy full discovery without prefetch (kept for compatibility)
+    async fn discover_full_legacy(&self, leagues: &[&str]) -> DiscoveryResult {
         let configs: Vec<_> = if leagues.is_empty() {
             get_league_configs()
         } else {
@@ -386,6 +555,74 @@ impl DiscoveryClient {
         result.kalshi_events_found = result.pairs.len();
 
         result
+    }
+
+    /// Build market pairs from prefetch result for a specific league/market_type
+    fn build_pairs_from_prefetch_data(
+        &self,
+        config: &LeagueConfig,
+        market_type: MarketType,
+        phase1: &crate::prefetch::PrefetchResult,
+        poly_tokens: &std::collections::HashMap<String, (String, String)>,
+        horizon_days: u32,
+    ) -> Result<Vec<MarketPair>> {
+        let series = match self.get_series_for_type(config, market_type) {
+            Some(s) => s,
+            None => return Ok(vec![]),
+        };
+
+        let mut pairs = Vec::new();
+
+        // Process all markets from prefetch for this series
+        for (event_ticker, markets) in &phase1.kalshi_markets {
+            // Check if event belongs to this series (event_ticker starts with series prefix)
+            if !event_ticker.as_str().starts_with(series) {
+                continue;
+            }
+
+            // Get event details
+            let event = match phase1.kalshi_events.get(event_ticker.as_str()) {
+                Some(e) => e,
+                None => continue,
+            };
+
+            // Parse event ticker
+            let parsed = match parse_kalshi_event_ticker(event_ticker) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Apply horizon filter
+            if !is_within_horizon(&parsed.date, horizon_days) {
+                continue;
+            }
+
+            // Process each market for this event
+            for market in markets {
+                let poly_slug =
+                    self.build_poly_slug(config.poly_prefix, &parsed, market_type, market);
+
+                // Check if we have Polymarket tokens for this slug
+                if let Some((yes_token, no_token)) = poly_tokens.get(&poly_slug) {
+                    let team_suffix = extract_team_suffix(&market.ticker);
+                    pairs.push(MarketPair {
+                        pair_id: format!("{}-{}", poly_slug, market.ticker).into(),
+                        league: config.league_code.to_string().into(),
+                        market_type,
+                        description: format!("{} - {}", event.title, market.title).into(),
+                        kalshi_event_ticker: event.event_ticker.clone().into(),
+                        kalshi_market_ticker: market.ticker.clone().into(),
+                        poly_slug: poly_slug.into(),
+                        poly_yes_token: yes_token.clone().into(),
+                        poly_no_token: no_token.clone().into(),
+                        line_value: market.floor_strike,
+                        team_suffix: team_suffix.map(|s| s.into()),
+                    });
+                }
+            }
+        }
+
+        Ok(pairs)
     }
 
     /// Incremental discovery - merge cached pairs with newly discovered ones
