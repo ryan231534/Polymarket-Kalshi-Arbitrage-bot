@@ -11,7 +11,10 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
 
 use crate::circuit_breaker::CircuitBreaker;
+use crate::config::{execution_threshold_cents, min_profit_cents};
+use crate::cost::{analyze_all_in, AllInCfg};
 use crate::kalshi::KalshiApiClient;
+use crate::mismatch::handle_mismatch;
 use crate::pnl::{ContractSide, PnLTracker, Side as PnLSide, Venue};
 use crate::polymarket_clob::SharedAsyncClient;
 use crate::position_tracker::{FillRecord, PositionChannel};
@@ -196,6 +199,50 @@ impl ExecutionEngine {
             });
         }
 
+        // === All-In Cost Gate ===
+        // Compute accurate fees (Kalshi + Poly), slippage, and expected profit
+        // This is the FINAL profitability check before execution
+        let all_in_cfg = AllInCfg::from_env();
+        let exec_threshold = execution_threshold_cents();
+        let min_profit = min_profit_cents();
+        let analysis = analyze_all_in(&req, max_contracts as u32, &all_in_cfg, exec_threshold, min_profit);
+
+        if !analysis.passes_threshold || !analysis.passes_min_profit {
+            // Structured rejection event with full cost breakdown
+            info!(
+                event = "exec_rejected_all_in",
+                market_id = market_id,
+                arb_type = ?req.arb_type,
+                contracts = analysis.contracts,
+                all_in_cost_total = analysis.all_in_cost_total,
+                cost_per_contract = analysis.cost_per_contract,
+                profit_total = analysis.profit_total,
+                profit_per_contract = analysis.profit_per_contract,
+                exec_threshold_cents = analysis.exec_threshold_cents,
+                min_profit_cents = analysis.min_profit_cents,
+                passes_threshold = analysis.passes_threshold,
+                passes_min_profit = analysis.passes_min_profit,
+                slippage_cents_per_leg = all_in_cfg.slippage_cents_per_leg,
+                kalshi_role = ?all_in_cfg.kalshi_role,
+                poly_maker_bps = all_in_cfg.poly_maker_bps,
+                poly_taker_bps = all_in_cfg.poly_taker_bps,
+                "Rejected by all-in cost model"
+            );
+
+            self.release_in_flight(market_id);
+            return Ok(ExecutionResult {
+                market_id,
+                success: false,
+                profit_cents: 0,
+                latency_ns: self.clock.now_ns() - req.detected_ns,
+                error: Some(if !analysis.passes_threshold {
+                    "All-in cost exceeds threshold"
+                } else {
+                    "Profit below minimum"
+                }),
+            });
+        }
+
         // Circuit breaker check
         if let Err(_reason) = self
             .circuit_breaker
@@ -272,8 +319,8 @@ impl ExecutionEngine {
                 let actual_profit = matched as i16 * 100 - (yes_cost + no_cost) as i16;
 
                 // === Automatic exposure management for mismatched fills ===
-                // If one leg fills more than the other, automatically close the excess
-                // to maintain market-neutral exposure (non-blocking background task)
+                // If one leg fills more than the other, use the mismatch playbook
+                // to flatten exposure with a deterministic unwind ladder
                 if yes_filled != no_filled && (yes_filled > 0 || no_filled > 0) {
                     let excess = (yes_filled - no_filled).abs();
                     let (leg1_name, leg2_name) = match req.arb_type {
@@ -293,7 +340,7 @@ impl ExecutionEngine {
                         excess = excess,
                         leg1 = leg1_name,
                         leg2 = leg2_name,
-                        "Fill mismatch detected, auto-closing excess"
+                        "Fill mismatch detected, initiating unwind playbook"
                     );
 
                     warn!(
@@ -301,42 +348,35 @@ impl ExecutionEngine {
                         leg1_name, yes_filled, leg2_name, no_filled, excess
                     );
 
-                    // Spawn auto-close in background (don't block hot path with 2s sleep)
+                    // Spawn mismatch handler in background with deterministic ladder unwind
                     let kalshi = self.kalshi.clone();
                     let poly_async = self.poly_async.clone();
+                    let circuit_breaker = self.circuit_breaker.clone();
+                    let pnl_tracker = self.pnl_tracker.clone();
                     let arb_type = req.arb_type;
                     let yes_price = req.yes_price;
                     let no_price = req.no_price;
-                    let poly_yes_token = pair.poly_yes_token.clone();
-                    let poly_no_token = pair.poly_no_token.clone();
-                    let kalshi_ticker = pair.kalshi_market_ticker.clone();
-                    let original_cost_per_contract = if yes_filled > no_filled {
-                        if yes_filled > 0 {
-                            yes_cost / yes_filled
-                        } else {
-                            0
-                        }
-                    } else {
-                        if no_filled > 0 {
-                            no_cost / no_filled
-                        } else {
-                            0
-                        }
-                    };
+                    let poly_yes_token = pair.poly_yes_token.to_string();
+                    let poly_no_token = pair.poly_no_token.to_string();
+                    let kalshi_ticker = pair.kalshi_market_ticker.to_string();
+                    let market_key_for_pnl = pair.pair_id.clone();
 
                     tokio::spawn(async move {
-                        Self::auto_close_background(
-                            kalshi,
-                            poly_async,
+                        handle_mismatch(
+                            market_id,
                             arb_type,
                             yes_filled,
                             no_filled,
                             yes_price,
                             no_price,
-                            poly_yes_token,
-                            poly_no_token,
-                            kalshi_ticker,
-                            original_cost_per_contract,
+                            &poly_yes_token,
+                            &poly_no_token,
+                            &kalshi_ticker,
+                            &kalshi,
+                            &poly_async,
+                            &circuit_breaker,
+                            &pnl_tracker,
+                            &market_key_for_pnl,
                         )
                         .await;
                     });
@@ -738,158 +778,6 @@ impl ExecutionEngine {
             yes_order_id,
             no_order_id,
         ))
-    }
-
-    /// Background task to automatically close excess exposure from mismatched fills
-    async fn auto_close_background(
-        kalshi: Arc<KalshiApiClient>,
-        poly_async: Arc<SharedAsyncClient>,
-        arb_type: ArbType,
-        yes_filled: i64,
-        no_filled: i64,
-        yes_price: u16,
-        no_price: u16,
-        poly_yes_token: Arc<str>,
-        poly_no_token: Arc<str>,
-        kalshi_ticker: Arc<str>,
-        original_cost_per_contract: i64,
-    ) {
-        let excess = (yes_filled - no_filled).abs();
-        if excess == 0 {
-            return;
-        }
-
-        // Helper to log P&L after close
-        let log_close_pnl = |platform: &str, closed: i64, proceeds: i64| {
-            if closed > 0 {
-                let close_pnl = proceeds - (original_cost_per_contract * excess);
-                info!(
-                    "[EXEC] ✅ Closed {} {} contracts for {}¢ (P&L: {}¢)",
-                    closed, platform, proceeds, close_pnl
-                );
-            } else {
-                warn!("[EXEC] ⚠️ Failed to close {} excess - 0 filled", platform);
-            }
-        };
-
-        match arb_type {
-            ArbType::PolyOnly => {
-                let (token, side, price) = if yes_filled > no_filled {
-                    (&poly_yes_token, "yes", yes_price)
-                } else {
-                    (&poly_no_token, "no", no_price)
-                };
-                let close_price = cents_to_price((price as i16).saturating_sub(10).max(1) as u16);
-
-                info!(
-                    "[EXEC] 🔄 Waiting 2s for Poly settlement before auto-close ({} {} contracts)",
-                    excess, side
-                );
-                tokio::time::sleep(Duration::from_secs(2)).await;
-
-                match poly_async.sell_fak(token, close_price, excess as f64).await {
-                    Ok(fill) => log_close_pnl(
-                        "Poly",
-                        fill.filled_size as i64,
-                        (fill.fill_cost * 100.0) as i64,
-                    ),
-                    Err(e) => warn!("[EXEC] ⚠️ Failed to close Poly excess: {}", e),
-                }
-            }
-
-            ArbType::KalshiOnly => {
-                let (side, price) = if yes_filled > no_filled {
-                    ("yes", yes_price as i64)
-                } else {
-                    ("no", no_price as i64)
-                };
-                let close_price = price.saturating_sub(10).max(1);
-
-                match kalshi
-                    .sell_ioc(&kalshi_ticker, side, close_price, excess)
-                    .await
-                {
-                    Ok(resp) => {
-                        let proceeds = resp.order.taker_fill_cost.unwrap_or(0)
-                            + resp.order.maker_fill_cost.unwrap_or(0);
-                        log_close_pnl("Kalshi", resp.order.filled_count(), proceeds);
-                    }
-                    Err(e) => warn!("[EXEC] ⚠️ Failed to close Kalshi excess: {}", e),
-                }
-            }
-
-            ArbType::PolyYesKalshiNo => {
-                if yes_filled > no_filled {
-                    // Poly YES excess
-                    let close_price =
-                        cents_to_price((yes_price as i16).saturating_sub(10).max(1) as u16);
-                    info!("[EXEC] 🔄 Waiting 2s for Poly settlement before auto-close ({} yes contracts)", excess);
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-
-                    match poly_async
-                        .sell_fak(&poly_yes_token, close_price, excess as f64)
-                        .await
-                    {
-                        Ok(fill) => log_close_pnl(
-                            "Poly",
-                            fill.filled_size as i64,
-                            (fill.fill_cost * 100.0) as i64,
-                        ),
-                        Err(e) => warn!("[EXEC] ⚠️ Failed to close Poly excess: {}", e),
-                    }
-                } else {
-                    // Kalshi NO excess
-                    let close_price = (no_price as i64).saturating_sub(10).max(1);
-                    match kalshi
-                        .sell_ioc(&kalshi_ticker, "no", close_price, excess)
-                        .await
-                    {
-                        Ok(resp) => {
-                            let proceeds = resp.order.taker_fill_cost.unwrap_or(0)
-                                + resp.order.maker_fill_cost.unwrap_or(0);
-                            log_close_pnl("Kalshi", resp.order.filled_count(), proceeds);
-                        }
-                        Err(e) => warn!("[EXEC] ⚠️ Failed to close Kalshi excess: {}", e),
-                    }
-                }
-            }
-
-            ArbType::KalshiYesPolyNo => {
-                if yes_filled > no_filled {
-                    // Kalshi YES excess
-                    let close_price = (yes_price as i64).saturating_sub(10).max(1);
-                    match kalshi
-                        .sell_ioc(&kalshi_ticker, "yes", close_price, excess)
-                        .await
-                    {
-                        Ok(resp) => {
-                            let proceeds = resp.order.taker_fill_cost.unwrap_or(0)
-                                + resp.order.maker_fill_cost.unwrap_or(0);
-                            log_close_pnl("Kalshi", resp.order.filled_count(), proceeds);
-                        }
-                        Err(e) => warn!("[EXEC] ⚠️ Failed to close Kalshi excess: {}", e),
-                    }
-                } else {
-                    // Poly NO excess
-                    let close_price =
-                        cents_to_price((no_price as i16).saturating_sub(10).max(1) as u16);
-                    info!("[EXEC] 🔄 Waiting 2s for Poly settlement before auto-close ({} no contracts)", excess);
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-
-                    match poly_async
-                        .sell_fak(&poly_no_token, close_price, excess as f64)
-                        .await
-                    {
-                        Ok(fill) => log_close_pnl(
-                            "Poly",
-                            fill.filled_size as i64,
-                            (fill.fill_cost * 100.0) as i64,
-                        ),
-                        Err(e) => warn!("[EXEC] ⚠️ Failed to close Poly excess: {}", e),
-                    }
-                }
-            }
-        }
     }
 
     #[inline(always)]

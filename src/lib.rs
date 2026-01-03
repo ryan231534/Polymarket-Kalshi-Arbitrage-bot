@@ -6,10 +6,12 @@
 pub mod cache;
 pub mod circuit_breaker;
 pub mod config;
+pub mod cost;
 pub mod discovery;
 pub mod execution;
 pub mod kalshi;
 pub mod logging;
+pub mod mismatch;
 pub mod pnl;
 pub mod polymarket;
 pub mod polymarket_clob;

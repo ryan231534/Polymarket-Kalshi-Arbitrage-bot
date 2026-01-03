@@ -28,6 +28,42 @@ pub const ARB_THRESHOLD: f64 = 0.995;
 /// Set lower values for more aggressive arbitrage (e.g., 99 = 1% profit minimum)
 const DEFAULT_PROFIT_THRESHOLD_CENTS: u16 = 100;
 
+/// Default minimum profit in cents per contract (must be positive to execute)
+const DEFAULT_MIN_PROFIT_CENTS: u16 = 1;
+
+/// Default slippage allowance in cents per leg (includes tick rounding worst-case)
+/// TODO: Polymarket tick sizes can be < 1 cent and would require Decimal/bps pricing for full fidelity.
+const DEFAULT_SLIPPAGE_CENTS_PER_LEG: u16 = 1;
+
+/// Default Polymarket maker fee in basis points (0 = no fee)
+const DEFAULT_POLY_MAKER_FEE_BPS: u16 = 0;
+
+/// Default Polymarket taker fee in basis points (0 = no fee)
+const DEFAULT_POLY_TAKER_FEE_BPS: u16 = 0;
+
+// === Mismatch / Unwind Configuration Defaults ===
+
+/// Maximum mismatch contracts before triggering severe mode
+const DEFAULT_MAX_MISMATCH_CONTRACTS: u32 = 1;
+
+/// Maximum ladder steps for unwind
+const DEFAULT_UNWIND_MAX_STEPS: u32 = 5;
+
+/// Price step size in cents for ladder
+const DEFAULT_UNWIND_STEP_CENTS: u16 = 1;
+
+/// Backoff between unwind steps in milliseconds
+const DEFAULT_UNWIND_BACKOFF_MS: u64 = 25;
+
+/// Panic price for buys (worst case to guarantee fill)
+const DEFAULT_UNWIND_PANIC_PRICE_BUY_CENTS: u16 = 99;
+
+/// Panic price for sells (worst case to guarantee fill)
+const DEFAULT_UNWIND_PANIC_PRICE_SELL_CENTS: u16 = 1;
+
+/// Multiplier for emergency unwind (severe mismatch)
+const DEFAULT_UNWIND_EMERGENCY_MULTIPLIER: u32 = 3;
+
 /// Polymarket ping interval (seconds) - keep connection alive
 pub const POLY_PING_INTERVAL_SECS: u64 = 30;
 
@@ -137,6 +173,349 @@ pub fn profit_threshold_cents() -> u16 {
 
         // Default value
         DEFAULT_PROFIT_THRESHOLD_CENTS
+    })
+}
+
+/// Kalshi fee role (taker or maker)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KalshiRole {
+    #[default]
+    Taker,
+    Maker,
+}
+
+/// Polymarket fee role (taker or maker)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PolyRole {
+    #[default]
+    Taker,
+    Maker,
+}
+
+/// Get execution threshold in cents (max all-in cost per contract to execute).
+///
+/// Priority:
+/// 1. EXECUTION_THRESHOLD_CENTS env var (if explicitly set)
+/// 2. PROFIT_THRESHOLD_CENTS env var (backward compat - same semantics)
+/// 3. ARB_THRESHOLD legacy fallback
+/// 4. Default (100 cents)
+///
+/// The value is cached after first call.
+pub fn execution_threshold_cents() -> u16 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u16> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        // Try EXECUTION_THRESHOLD_CENTS first (new preferred)
+        if let Ok(val_str) = std::env::var("EXECUTION_THRESHOLD_CENTS") {
+            if let Ok(cents) = val_str.parse::<u16>() {
+                if cents > 0 && cents <= 100 {
+                    return cents;
+                } else {
+                    warn!(
+                        "Invalid EXECUTION_THRESHOLD_CENTS={} (must be 1-100), using PROFIT_THRESHOLD_CENTS fallback",
+                        cents
+                    );
+                }
+            } else {
+                warn!(
+                    "Failed to parse EXECUTION_THRESHOLD_CENTS='{}', using PROFIT_THRESHOLD_CENTS fallback",
+                    val_str
+                );
+            }
+        }
+        // Fall back to profit_threshold_cents() which handles PROFIT_THRESHOLD_CENTS and ARB_THRESHOLD
+        profit_threshold_cents()
+    })
+}
+
+/// Get minimum profit in cents per contract required to execute.
+///
+/// Reads from MIN_PROFIT_CENTS env var, defaults to 1.
+/// The value is cached after first call.
+pub fn min_profit_cents() -> u16 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u16> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val_str) = std::env::var("MIN_PROFIT_CENTS") {
+            if let Ok(cents) = val_str.parse::<u16>() {
+                return cents; // Allow 0 to disable the check
+            } else {
+                warn!(
+                    "Failed to parse MIN_PROFIT_CENTS='{}', using default {}",
+                    val_str, DEFAULT_MIN_PROFIT_CENTS
+                );
+            }
+        }
+        DEFAULT_MIN_PROFIT_CENTS
+    })
+}
+
+/// Get slippage allowance in cents per leg.
+///
+/// This includes worst-case tick/rounding effects.
+/// Reads from SLIPPAGE_CENTS_PER_LEG env var, defaults to 1.
+/// The value is cached after first call.
+pub fn slippage_cents_per_leg() -> u16 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u16> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val_str) = std::env::var("SLIPPAGE_CENTS_PER_LEG") {
+            if let Ok(cents) = val_str.parse::<u16>() {
+                return cents;
+            } else {
+                warn!(
+                    "Failed to parse SLIPPAGE_CENTS_PER_LEG='{}', using default {}",
+                    val_str, DEFAULT_SLIPPAGE_CENTS_PER_LEG
+                );
+            }
+        }
+        DEFAULT_SLIPPAGE_CENTS_PER_LEG
+    })
+}
+
+/// Get Polymarket maker fee in basis points.
+///
+/// Reads from POLY_MAKER_FEE_BPS env var, defaults to 0.
+/// The value is cached after first call.
+pub fn poly_maker_fee_bps() -> u16 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u16> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val_str) = std::env::var("POLY_MAKER_FEE_BPS") {
+            if let Ok(bps) = val_str.parse::<u16>() {
+                return bps;
+            } else {
+                warn!(
+                    "Failed to parse POLY_MAKER_FEE_BPS='{}', using default {}",
+                    val_str, DEFAULT_POLY_MAKER_FEE_BPS
+                );
+            }
+        }
+        DEFAULT_POLY_MAKER_FEE_BPS
+    })
+}
+
+/// Get Polymarket taker fee in basis points.
+///
+/// Reads from POLY_TAKER_FEE_BPS env var, defaults to 0.
+/// The value is cached after first call.
+pub fn poly_taker_fee_bps() -> u16 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u16> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val_str) = std::env::var("POLY_TAKER_FEE_BPS") {
+            if let Ok(bps) = val_str.parse::<u16>() {
+                return bps;
+            } else {
+                warn!(
+                    "Failed to parse POLY_TAKER_FEE_BPS='{}', using default {}",
+                    val_str, DEFAULT_POLY_TAKER_FEE_BPS
+                );
+            }
+        }
+        DEFAULT_POLY_TAKER_FEE_BPS
+    })
+}
+
+/// Get Kalshi fee role (taker or maker).
+///
+/// Reads from KALSHI_FEE_ROLE env var ("taker" or "maker"), defaults to taker.
+/// The value is cached after first call.
+pub fn kalshi_fee_role() -> KalshiRole {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<KalshiRole> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val_str) = std::env::var("KALSHI_FEE_ROLE") {
+            match val_str.to_lowercase().as_str() {
+                "maker" => return KalshiRole::Maker,
+                "taker" => return KalshiRole::Taker,
+                _ => {
+                    warn!(
+                        "Invalid KALSHI_FEE_ROLE='{}' (must be 'taker' or 'maker'), using default 'taker'",
+                        val_str
+                    );
+                }
+            }
+        }
+        KalshiRole::Taker
+    })
+}
+
+// === Mismatch / Unwind Configuration Functions ===
+
+/// Get maximum mismatch contracts before triggering severe mode.
+///
+/// Reads from MAX_MISMATCH_CONTRACTS env var, defaults to 1.
+pub fn max_mismatch_contracts() -> u32 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u32> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val_str) = std::env::var("MAX_MISMATCH_CONTRACTS") {
+            if let Ok(val) = val_str.parse::<u32>() {
+                return val;
+            } else {
+                warn!(
+                    "Failed to parse MAX_MISMATCH_CONTRACTS='{}', using default {}",
+                    val_str, DEFAULT_MAX_MISMATCH_CONTRACTS
+                );
+            }
+        }
+        DEFAULT_MAX_MISMATCH_CONTRACTS
+    })
+}
+
+/// Get maximum ladder steps for unwind.
+///
+/// Reads from UNWIND_MAX_STEPS env var, defaults to 5.
+pub fn unwind_max_steps() -> u32 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u32> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val_str) = std::env::var("UNWIND_MAX_STEPS") {
+            if let Ok(val) = val_str.parse::<u32>() {
+                return val;
+            } else {
+                warn!(
+                    "Failed to parse UNWIND_MAX_STEPS='{}', using default {}",
+                    val_str, DEFAULT_UNWIND_MAX_STEPS
+                );
+            }
+        }
+        DEFAULT_UNWIND_MAX_STEPS
+    })
+}
+
+/// Get price step size in cents for ladder.
+///
+/// Reads from UNWIND_STEP_CENTS env var, defaults to 1.
+pub fn unwind_step_cents() -> u16 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u16> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val_str) = std::env::var("UNWIND_STEP_CENTS") {
+            if let Ok(val) = val_str.parse::<u16>() {
+                return val;
+            } else {
+                warn!(
+                    "Failed to parse UNWIND_STEP_CENTS='{}', using default {}",
+                    val_str, DEFAULT_UNWIND_STEP_CENTS
+                );
+            }
+        }
+        DEFAULT_UNWIND_STEP_CENTS
+    })
+}
+
+/// Get backoff between unwind steps in milliseconds.
+///
+/// Reads from UNWIND_BACKOFF_MS env var, defaults to 25.
+pub fn unwind_backoff_ms() -> u64 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u64> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val_str) = std::env::var("UNWIND_BACKOFF_MS") {
+            if let Ok(val) = val_str.parse::<u64>() {
+                return val;
+            } else {
+                warn!(
+                    "Failed to parse UNWIND_BACKOFF_MS='{}', using default {}",
+                    val_str, DEFAULT_UNWIND_BACKOFF_MS
+                );
+            }
+        }
+        DEFAULT_UNWIND_BACKOFF_MS
+    })
+}
+
+/// Get panic price for buys (worst case to guarantee fill).
+///
+/// Reads from UNWIND_PANIC_PRICE_BUY_CENTS env var, defaults to 99.
+pub fn unwind_panic_price_buy_cents() -> u16 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u16> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val_str) = std::env::var("UNWIND_PANIC_PRICE_BUY_CENTS") {
+            if let Ok(val) = val_str.parse::<u16>() {
+                if val >= 1 && val <= 99 {
+                    return val;
+                }
+            }
+            warn!(
+                "Invalid UNWIND_PANIC_PRICE_BUY_CENTS='{}', using default {}",
+                val_str, DEFAULT_UNWIND_PANIC_PRICE_BUY_CENTS
+            );
+        }
+        DEFAULT_UNWIND_PANIC_PRICE_BUY_CENTS
+    })
+}
+
+/// Get panic price for sells (worst case to guarantee fill).
+///
+/// Reads from UNWIND_PANIC_PRICE_SELL_CENTS env var, defaults to 1.
+pub fn unwind_panic_price_sell_cents() -> u16 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u16> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val_str) = std::env::var("UNWIND_PANIC_PRICE_SELL_CENTS") {
+            if let Ok(val) = val_str.parse::<u16>() {
+                if val >= 1 && val <= 99 {
+                    return val;
+                }
+            }
+            warn!(
+                "Invalid UNWIND_PANIC_PRICE_SELL_CENTS='{}', using default {}",
+                val_str, DEFAULT_UNWIND_PANIC_PRICE_SELL_CENTS
+            );
+        }
+        DEFAULT_UNWIND_PANIC_PRICE_SELL_CENTS
+    })
+}
+
+/// Get multiplier for emergency unwind (severe mismatch).
+///
+/// Reads from UNWIND_EMERGENCY_MULTIPLIER env var, defaults to 3.
+pub fn unwind_emergency_multiplier() -> u32 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u32> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val_str) = std::env::var("UNWIND_EMERGENCY_MULTIPLIER") {
+            if let Ok(val) = val_str.parse::<u32>() {
+                if val >= 1 {
+                    return val;
+                }
+            }
+            warn!(
+                "Invalid UNWIND_EMERGENCY_MULTIPLIER='{}', using default {}",
+                val_str, DEFAULT_UNWIND_EMERGENCY_MULTIPLIER
+            );
+        }
+        DEFAULT_UNWIND_EMERGENCY_MULTIPLIER
     })
 }
 

@@ -25,10 +25,12 @@
 mod cache;
 mod circuit_breaker;
 mod config;
+mod cost;
 mod discovery;
 mod execution;
 mod kalshi;
 mod logging;
+mod mismatch;
 mod pnl;
 mod polymarket;
 mod polymarket_clob;

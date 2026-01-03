@@ -73,6 +73,28 @@ pub const MAX_MARKETS: usize = 1024;
 /// Sentinel value indicating no price is currently available
 pub const NO_PRICE: PriceCents = 0;
 
+/// Sanitize a price value: if outside valid range [1..=99], return NO_PRICE.
+/// This prevents invalid/sentinel prices from entering the orderbook.
+#[inline(always)]
+pub fn sanitize_price(price: PriceCents) -> PriceCents {
+    if price >= 1 && price <= 99 {
+        price
+    } else {
+        NO_PRICE
+    }
+}
+
+/// Sanitize price and size together: if price is invalid, set both to sentinel state.
+/// Returns (sanitized_price, sanitized_size) where invalid price results in (NO_PRICE, 0).
+#[inline(always)]
+pub fn sanitize_price_size(price: PriceCents, size: SizeCents) -> (PriceCents, SizeCents) {
+    if price >= 1 && price <= 99 {
+        (price, size)
+    } else {
+        (NO_PRICE, 0)
+    }
+}
+
 /// Pack orderbook state into a single u64 for atomic operations.
 /// Bit layout: [yes_ask:16][no_ask:16][yes_size:16][no_size:16]
 #[inline(always)]
@@ -119,7 +141,7 @@ impl AtomicOrderbook {
         unpack_orderbook(self.packed.load(Ordering::Acquire))
     }
 
-    /// Store new state
+    /// Store new state. Prices outside valid range [1..=99] are sanitized to NO_PRICE with size=0.
     #[inline(always)]
     pub fn store(
         &self,
@@ -128,15 +150,18 @@ impl AtomicOrderbook {
         yes_size: SizeCents,
         no_size: SizeCents,
     ) {
+        let (yes_ask, yes_size) = sanitize_price_size(yes_ask, yes_size);
+        let (no_ask, no_size) = sanitize_price_size(no_ask, no_size);
         self.packed.store(
             pack_orderbook(yes_ask, no_ask, yes_size, no_size),
             Ordering::Release,
         );
     }
 
-    /// Update YES side only
+    /// Update YES side only. Price outside valid range [1..=99] is sanitized to NO_PRICE with size=0.
     #[inline(always)]
     pub fn update_yes(&self, yes_ask: PriceCents, yes_size: SizeCents) {
+        let (yes_ask, yes_size) = sanitize_price_size(yes_ask, yes_size);
         let mut current = self.packed.load(Ordering::Acquire);
         loop {
             let (_, no_ask, _, no_size) = unpack_orderbook(current);
@@ -153,9 +178,10 @@ impl AtomicOrderbook {
         }
     }
 
-    /// Update NO side only
+    /// Update NO side only. Price outside valid range [1..=99] is sanitized to NO_PRICE with size=0.
     #[inline(always)]
     pub fn update_no(&self, no_ask: PriceCents, no_size: SizeCents) {
+        let (no_ask, no_size) = sanitize_price_size(no_ask, no_size);
         let mut current = self.packed.load(Ordering::Acquire);
         loop {
             let (yes_ask, _, yes_size, _) = unpack_orderbook(current);
@@ -205,13 +231,33 @@ impl AtomicMarketState {
     pub fn check_arbs(&self, threshold_cents: PriceCents) -> u8 {
         use wide::{i16x8, CmpLt};
 
-        let (k_yes, k_no, _, _) = self.kalshi.load();
-        let (p_yes, p_no, _, _) = self.poly.load();
+        let (k_yes, k_no, k_yes_size, k_no_size) = self.kalshi.load();
+        let (p_yes, p_no, p_yes_size, p_no_size) = self.poly.load();
 
-        if k_yes == NO_PRICE || k_no == NO_PRICE || p_yes == NO_PRICE || p_no == NO_PRICE {
+        // SAFETY: Guard against sentinel/invalid prices BEFORE any i16 casts or SIMD ops.
+        // Valid prices are in [1..=99] (cents). NO_PRICE (0) and values > 99 are invalid.
+        // Without this guard, values like u16::MAX would wrap to negative when cast to i16,
+        // producing fake profitable arbitrage signals.
+        #[inline(always)]
+        fn is_valid_price(p: PriceCents) -> bool {
+            p >= 1 && p <= 99
+        }
+
+        // All four prices must be valid
+        if !is_valid_price(k_yes)
+            || !is_valid_price(k_no)
+            || !is_valid_price(p_yes)
+            || !is_valid_price(p_no)
+        {
             return 0;
         }
 
+        // Also reject if any required size is zero (no liquidity)
+        if k_yes_size == 0 || k_no_size == 0 || p_yes_size == 0 || p_no_size == 0 {
+            return 0;
+        }
+
+        // SAFETY: Prices are now guaranteed to be in [1..=99], safe for KALSHI_FEE_TABLE indexing
         let k_yes_fee = KALSHI_FEE_TABLE[k_yes as usize];
         let k_no_fee = KALSHI_FEE_TABLE[k_no as usize];
 
@@ -874,6 +920,189 @@ mod tests {
         assert!(mask & 2 != 0, "Should detect Kalshi YES + Poly NO");
         assert!(mask & 4 != 0, "Should detect Poly-only");
         assert!(mask & 8 != 0, "Should detect Kalshi-only");
+    }
+
+    // =========================================================================
+    // Sentinel/Invalid Price Guard Tests (Issue #1)
+    // =========================================================================
+
+    /// Helper to create market state with raw values (bypasses sanitization for testing guard)
+    fn make_market_state_raw(
+        kalshi_yes: PriceCents,
+        kalshi_no: PriceCents,
+        kalshi_yes_size: SizeCents,
+        kalshi_no_size: SizeCents,
+        poly_yes: PriceCents,
+        poly_no: PriceCents,
+        poly_yes_size: SizeCents,
+        poly_no_size: SizeCents,
+    ) -> AtomicMarketState {
+        let state = AtomicMarketState::new(0);
+        // Directly write to packed to bypass sanitization for guard testing
+        state.kalshi.packed.store(
+            pack_orderbook(kalshi_yes, kalshi_no, kalshi_yes_size, kalshi_no_size),
+            std::sync::atomic::Ordering::Release,
+        );
+        state.poly.packed.store(
+            pack_orderbook(poly_yes, poly_no, poly_yes_size, poly_no_size),
+            std::sync::atomic::Ordering::Release,
+        );
+        state
+    }
+
+    #[test]
+    fn test_check_arbs_sentinel_u16_max_kalshi() {
+        // u16::MAX (65535) as price would wrap to -1 when cast to i16.
+        // Without guard, this could create fake negative costs.
+        // Guard should reject and return 0.
+        let state = make_market_state_raw(
+            u16::MAX, 40, 1000, 1000, // Kalshi: YES=u16::MAX (invalid), NO=40
+            40, 40, 1000, 1000, // Poly: YES=40, NO=40
+        );
+
+        let mask = state.check_arbs(100);
+        assert_eq!(mask, 0, "Should return 0 when Kalshi YES price is u16::MAX sentinel");
+    }
+
+    #[test]
+    fn test_check_arbs_sentinel_u16_max_poly() {
+        // Test sentinel on Polymarket side
+        let state = make_market_state_raw(
+            40, 40, 1000, 1000, // Kalshi: valid
+            u16::MAX, 40, 1000, 1000, // Poly: YES=u16::MAX (invalid)
+        );
+
+        let mask = state.check_arbs(100);
+        assert_eq!(mask, 0, "Should return 0 when Poly YES price is u16::MAX sentinel");
+    }
+
+    #[test]
+    fn test_check_arbs_price_above_valid_range() {
+        // Price of 100+ is outside valid range [1..=99]
+        // 100 cents = $1.00 which is the settlement price, not a tradeable price
+        let state = make_market_state_raw(
+            100, 40, 1000, 1000, // Kalshi: YES=100 (out of range)
+            40, 40, 1000, 1000, // Poly: valid
+        );
+
+        let mask = state.check_arbs(100);
+        assert_eq!(mask, 0, "Should return 0 when price is 100 (out of valid range)");
+    }
+
+    #[test]
+    fn test_check_arbs_price_200() {
+        // Price of 200 is way outside valid range
+        let state = make_market_state_raw(
+            200, 40, 1000, 1000, // Kalshi: YES=200 (invalid)
+            40, 40, 1000, 1000, // Poly: valid
+        );
+
+        let mask = state.check_arbs(100);
+        assert_eq!(mask, 0, "Should return 0 when price is 200 (out of valid range)");
+    }
+
+    #[test]
+    fn test_check_arbs_zero_size_no_liquidity() {
+        // Zero size means no liquidity - should reject
+        let state = make_market_state_raw(
+            40, 40, 0, 1000, // Kalshi: YES has size=0 (no liquidity)
+            40, 40, 1000, 1000, // Poly: valid
+        );
+
+        let mask = state.check_arbs(100);
+        assert_eq!(mask, 0, "Should return 0 when any size is 0 (no liquidity)");
+    }
+
+    #[test]
+    fn test_check_arbs_all_sizes_zero() {
+        // All sizes zero
+        let state = make_market_state_raw(
+            40, 40, 0, 0, // Kalshi: no liquidity
+            40, 40, 0, 0, // Poly: no liquidity
+        );
+
+        let mask = state.check_arbs(100);
+        assert_eq!(mask, 0, "Should return 0 when all sizes are 0");
+    }
+
+    #[test]
+    fn test_check_arbs_i16_wrap_attack() {
+        // Specifically test that u16::MAX doesn't produce profitable arb via i16 wrap.
+        // u16::MAX = 65535, as i16 = -1.
+        // If unchecked: cost = p_yes + k_no + fee = 40 + (-1) + 0 = 39 < 100 = FAKE PROFITABLE!
+        let state = make_market_state_raw(
+            u16::MAX, u16::MAX, 1000, 1000, // Both Kalshi prices invalid
+            40, 40, 1000, 1000, // Poly: valid
+        );
+
+        let mask = state.check_arbs(100);
+        assert_eq!(mask, 0, "Guard must prevent i16 wrap attack from producing fake arb");
+    }
+
+    #[test]
+    fn test_store_sanitizes_invalid_price() {
+        // Test that store() sanitizes invalid prices
+        let book = AtomicOrderbook::new();
+        book.store(u16::MAX, 40, 1000, 500);
+
+        let (yes_ask, no_ask, yes_size, no_size) = book.load();
+        assert_eq!(yes_ask, NO_PRICE, "Invalid price should be sanitized to NO_PRICE");
+        assert_eq!(yes_size, 0, "Size should be set to 0 when price is invalid");
+        assert_eq!(no_ask, 40, "Valid price should be unchanged");
+        assert_eq!(no_size, 500, "Valid size should be unchanged");
+    }
+
+    #[test]
+    fn test_update_yes_sanitizes_invalid_price() {
+        let book = AtomicOrderbook::new();
+        book.store(50, 50, 1000, 1000);
+        book.update_yes(200, 500); // Invalid price
+
+        let (yes_ask, no_ask, yes_size, no_size) = book.load();
+        assert_eq!(yes_ask, NO_PRICE, "update_yes should sanitize invalid price");
+        assert_eq!(yes_size, 0, "update_yes should set size to 0 for invalid price");
+        assert_eq!(no_ask, 50, "NO side should be unchanged");
+        assert_eq!(no_size, 1000, "NO size should be unchanged");
+    }
+
+    #[test]
+    fn test_update_no_sanitizes_invalid_price() {
+        let book = AtomicOrderbook::new();
+        book.store(50, 50, 1000, 1000);
+        book.update_no(100, 500); // Price 100 is out of [1..=99] range
+
+        let (yes_ask, no_ask, yes_size, no_size) = book.load();
+        assert_eq!(yes_ask, 50, "YES side should be unchanged");
+        assert_eq!(yes_size, 1000, "YES size should be unchanged");
+        assert_eq!(no_ask, NO_PRICE, "update_no should sanitize price=100");
+        assert_eq!(no_size, 0, "update_no should set size to 0 for invalid price");
+    }
+
+    #[test]
+    fn test_sanitize_price_function() {
+        // Valid range [1..=99]
+        assert_eq!(sanitize_price(1), 1);
+        assert_eq!(sanitize_price(50), 50);
+        assert_eq!(sanitize_price(99), 99);
+
+        // Invalid values
+        assert_eq!(sanitize_price(0), NO_PRICE);
+        assert_eq!(sanitize_price(100), NO_PRICE);
+        assert_eq!(sanitize_price(101), NO_PRICE);
+        assert_eq!(sanitize_price(u16::MAX), NO_PRICE);
+    }
+
+    #[test]
+    fn test_sanitize_price_size_function() {
+        // Valid
+        assert_eq!(sanitize_price_size(50, 1000), (50, 1000));
+        assert_eq!(sanitize_price_size(1, 1), (1, 1));
+        assert_eq!(sanitize_price_size(99, u16::MAX), (99, u16::MAX));
+
+        // Invalid price => (NO_PRICE, 0)
+        assert_eq!(sanitize_price_size(0, 1000), (NO_PRICE, 0));
+        assert_eq!(sanitize_price_size(100, 1000), (NO_PRICE, 0));
+        assert_eq!(sanitize_price_size(u16::MAX, 1000), (NO_PRICE, 0));
     }
 
     // =========================================================================
