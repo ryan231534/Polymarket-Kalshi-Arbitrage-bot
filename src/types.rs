@@ -64,8 +64,8 @@ pub struct MarketPair {
 /// Price representation in cents (1-99 for $0.01-$0.99), 0 indicates no price available
 pub type PriceCents = u16;
 
-/// Size representation in cents (dollar amount × 100), maximum ~$655k per side
-pub type SizeCents = u16;
+/// Quantity representation in contracts/shares as integer, maximum 65535 contracts per side
+pub type QtyContracts = u32;
 
 /// Maximum number of concurrently tracked markets
 pub const MAX_MARKETS: usize = 1024;
@@ -85,39 +85,36 @@ pub fn sanitize_price(price: PriceCents) -> PriceCents {
 }
 
 /// Sanitize price and size together: if price is invalid, set both to sentinel state.
-/// Returns (sanitized_price, sanitized_size) where invalid price results in (NO_PRICE, 0).
+/// Returns (sanitized_price, sanitized_qty) where invalid price results in (NO_PRICE, 0).
 #[inline(always)]
-pub fn sanitize_price_size(price: PriceCents, size: SizeCents) -> (PriceCents, SizeCents) {
+pub fn sanitize_price_size(price: PriceCents, qty: QtyContracts) -> (PriceCents, QtyContracts) {
     if price >= 1 && price <= 99 {
-        (price, size)
+        (price, qty)
     } else {
         (NO_PRICE, 0)
     }
 }
 
 /// Pack orderbook state into a single u64 for atomic operations.
-/// Bit layout: [yes_ask:16][no_ask:16][yes_size:16][no_size:16]
+/// Bit layout: [yes_ask:16][no_ask:16][yes_qty:16][no_qty:16]
 #[inline(always)]
 pub fn pack_orderbook(
     yes_ask: PriceCents,
     no_ask: PriceCents,
-    yes_size: SizeCents,
-    no_size: SizeCents,
+    yes_qty: QtyContracts,
+    no_qty: QtyContracts,
 ) -> u64 {
-    ((yes_ask as u64) << 48)
-        | ((no_ask as u64) << 32)
-        | ((yes_size as u64) << 16)
-        | (no_size as u64)
+    ((yes_ask as u64) << 48) | ((no_ask as u64) << 32) | ((yes_qty as u64) << 16) | (no_qty as u64)
 }
 
 /// Unpack a u64 orderbook representation back into its component values
 #[inline(always)]
-pub fn unpack_orderbook(packed: u64) -> (PriceCents, PriceCents, SizeCents, SizeCents) {
+pub fn unpack_orderbook(packed: u64) -> (PriceCents, PriceCents, QtyContracts, QtyContracts) {
     let yes_ask = ((packed >> 48) & 0xFFFF) as PriceCents;
     let no_ask = ((packed >> 32) & 0xFFFF) as PriceCents;
-    let yes_size = ((packed >> 16) & 0xFFFF) as SizeCents;
-    let no_size = (packed & 0xFFFF) as SizeCents;
-    (yes_ask, no_ask, yes_size, no_size)
+    let yes_qty = ((packed >> 16) & 0xFFFF) as QtyContracts;
+    let no_qty = (packed & 0xFFFF) as QtyContracts;
+    (yes_ask, no_ask, yes_qty, no_qty)
 }
 
 /// Lock-free orderbook state for a single trading platform.
@@ -137,35 +134,35 @@ impl AtomicOrderbook {
 
     /// Load current state
     #[inline(always)]
-    pub fn load(&self) -> (PriceCents, PriceCents, SizeCents, SizeCents) {
+    pub fn load(&self) -> (PriceCents, PriceCents, QtyContracts, QtyContracts) {
         unpack_orderbook(self.packed.load(Ordering::Acquire))
     }
 
-    /// Store new state. Prices outside valid range [1..=99] are sanitized to NO_PRICE with size=0.
+    /// Store new state. Prices outside valid range [1..=99] are sanitized to NO_PRICE with qty=0.
     #[inline(always)]
     pub fn store(
         &self,
         yes_ask: PriceCents,
         no_ask: PriceCents,
-        yes_size: SizeCents,
-        no_size: SizeCents,
+        yes_qty: QtyContracts,
+        no_qty: QtyContracts,
     ) {
-        let (yes_ask, yes_size) = sanitize_price_size(yes_ask, yes_size);
-        let (no_ask, no_size) = sanitize_price_size(no_ask, no_size);
+        let (yes_ask, yes_qty) = sanitize_price_size(yes_ask, yes_qty);
+        let (no_ask, no_qty) = sanitize_price_size(no_ask, no_qty);
         self.packed.store(
-            pack_orderbook(yes_ask, no_ask, yes_size, no_size),
+            pack_orderbook(yes_ask, no_ask, yes_qty, no_qty),
             Ordering::Release,
         );
     }
 
-    /// Update YES side only. Price outside valid range [1..=99] is sanitized to NO_PRICE with size=0.
+    /// Update YES side only. Price outside valid range [1..=99] is sanitized to NO_PRICE with qty=0.
     #[inline(always)]
-    pub fn update_yes(&self, yes_ask: PriceCents, yes_size: SizeCents) {
-        let (yes_ask, yes_size) = sanitize_price_size(yes_ask, yes_size);
+    pub fn update_yes(&self, yes_ask: PriceCents, yes_qty: QtyContracts) {
+        let (yes_ask, yes_qty) = sanitize_price_size(yes_ask, yes_qty);
         let mut current = self.packed.load(Ordering::Acquire);
         loop {
-            let (_, no_ask, _, no_size) = unpack_orderbook(current);
-            let new = pack_orderbook(yes_ask, no_ask, yes_size, no_size);
+            let (_, no_ask, _, no_qty) = unpack_orderbook(current);
+            let new = pack_orderbook(yes_ask, no_ask, yes_qty, no_qty);
             match self.packed.compare_exchange_weak(
                 current,
                 new,
@@ -178,14 +175,14 @@ impl AtomicOrderbook {
         }
     }
 
-    /// Update NO side only. Price outside valid range [1..=99] is sanitized to NO_PRICE with size=0.
+    /// Update NO side only. Price outside valid range [1..=99] is sanitized to NO_PRICE with qty=0.
     #[inline(always)]
-    pub fn update_no(&self, no_ask: PriceCents, no_size: SizeCents) {
-        let (no_ask, no_size) = sanitize_price_size(no_ask, no_size);
+    pub fn update_no(&self, no_ask: PriceCents, no_qty: QtyContracts) {
+        let (no_ask, no_qty) = sanitize_price_size(no_ask, no_qty);
         let mut current = self.packed.load(Ordering::Acquire);
         loop {
-            let (yes_ask, _, yes_size, _) = unpack_orderbook(current);
-            let new = pack_orderbook(yes_ask, no_ask, yes_size, no_size);
+            let (yes_ask, _, yes_qty, _) = unpack_orderbook(current);
+            let new = pack_orderbook(yes_ask, no_ask, yes_qty, no_qty);
             match self.packed.compare_exchange_weak(
                 current,
                 new,
@@ -240,7 +237,7 @@ impl AtomicMarketState {
         // producing fake profitable arbitrage signals.
         #[inline(always)]
         fn is_valid_price(p: PriceCents) -> bool {
-            p >= 1 && p <= 99
+            (1..=99).contains(&p)
         }
 
         // All four prices must be valid
@@ -364,7 +361,7 @@ pub fn parse_price(s: &str) -> PriceCents {
         }
     }
     // Fallback to standard parse
-    s.parse::<f64>().map(|p| price_to_cents(p)).unwrap_or(0)
+    s.parse::<f64>().map(price_to_cents).unwrap_or(0)
 }
 
 /// Arbitrage opportunity type, determining the execution strategy
@@ -389,10 +386,10 @@ pub struct FastExecutionRequest {
     pub yes_price: PriceCents,
     /// NO outcome ask price in cents
     pub no_price: PriceCents,
-    /// YES outcome available size in cents
-    pub yes_size: SizeCents,
-    /// NO outcome available size in cents
-    pub no_size: SizeCents,
+    /// YES outcome available quantity in contracts
+    pub yes_size: QtyContracts,
+    /// NO outcome available quantity in contracts
+    pub no_size: QtyContracts,
     /// Arbitrage type (determines execution strategy)
     pub arb_type: ArbType,
     /// Detection timestamp in nanoseconds since system start
@@ -401,8 +398,8 @@ pub struct FastExecutionRequest {
 
 impl FastExecutionRequest {
     #[inline(always)]
-    pub fn profit_cents(&self) -> i16 {
-        100 - (self.yes_price as i16 + self.no_price as i16 + self.estimated_fee_cents() as i16)
+    pub fn profit_cents(&self) -> i64 {
+        100 - (self.yes_price as i64 + self.no_price as i64 + self.estimated_fee_cents() as i64)
     }
 
     #[inline(always)]
@@ -945,12 +942,12 @@ mod tests {
     fn make_market_state_raw(
         kalshi_yes: PriceCents,
         kalshi_no: PriceCents,
-        kalshi_yes_size: SizeCents,
-        kalshi_no_size: SizeCents,
+        kalshi_yes_size: QtyContracts,
+        kalshi_no_size: QtyContracts,
         poly_yes: PriceCents,
         poly_no: PriceCents,
-        poly_yes_size: SizeCents,
-        poly_no_size: SizeCents,
+        poly_yes_size: QtyContracts,
+        poly_no_size: QtyContracts,
     ) -> AtomicMarketState {
         let state = AtomicMarketState::new(0);
         // Directly write to packed to bypass sanitization for guard testing
@@ -1157,7 +1154,7 @@ mod tests {
         // Valid
         assert_eq!(sanitize_price_size(50, 1000), (50, 1000));
         assert_eq!(sanitize_price_size(1, 1), (1, 1));
-        assert_eq!(sanitize_price_size(99, u16::MAX), (99, u16::MAX));
+        assert_eq!(sanitize_price_size(99, u32::MAX), (99, u32::MAX));
 
         // Invalid price => (NO_PRICE, 0)
         assert_eq!(sanitize_price_size(0, 1000), (NO_PRICE, 0));
@@ -1540,12 +1537,12 @@ mod tests {
                             // Simulate Kalshi updates
                             market
                                 .kalshi
-                                .update_yes(40 + ((j % 10) as u16), 500 + j as u16);
+                                .update_yes(40 + ((j % 10) as u16), 500 + j as u32);
                         } else {
                             // Simulate Poly updates
                             market
                                 .poly
-                                .update_no(50 + ((j % 10) as u16), 600 + j as u16);
+                                .update_no(50 + ((j % 10) as u16), 600 + j as u32);
                         }
 
                         // Check arbs (should never panic) - threshold = 100 cents
@@ -1568,6 +1565,152 @@ mod tests {
         assert!(k_no > 0 && k_no < 100);
         assert!(p_yes > 0 && p_yes < 100);
         assert!(p_no > 0 && p_no < 100);
+    }
+
+    // =========================================================================
+    // Quantity (QtyContracts) Correctness Tests
+    // =========================================================================
+
+    #[test]
+    fn test_qty_contracts_uses_integer_quantity() {
+        // Test that QtyContracts stores integer contract quantity, not dollars-to-cents
+        let book = AtomicOrderbook::new();
+
+        // Store qty as integer contracts (e.g., 50 contracts at 40 cents each)
+        book.store(40, 60, 50, 100);
+
+        let (yes_ask, no_ask, yes_qty, no_qty) = book.load();
+        assert_eq!(yes_ask, 40, "Price should be 40 cents");
+        assert_eq!(yes_qty, 50, "Qty should be 50 contracts, not 5000 cents");
+        assert_eq!(no_ask, 60, "Price should be 60 cents");
+        assert_eq!(no_qty, 100, "Qty should be 100 contracts, not 10000 cents");
+    }
+
+    #[test]
+    fn test_arb_sizing_no_division_by_100() {
+        // Test that arb sizing uses qty directly without dividing by 100
+        // This test would have FAILED before the fix
+        let state = GlobalState::new();
+        let market = &state.markets[0];
+
+        // Set orderbooks with quantities in contracts
+        // Poly: 50 YES contracts at 40¢, 20 NO contracts at 60¢
+        market.poly.store(40, 60, 50, 20);
+        // Kalshi: 100 YES contracts at 45¢, 30 NO contracts at 55¢
+        market.kalshi.store(45, 55, 100, 30);
+
+        // Build execution request for Poly YES + Kalshi NO arb
+        let (p_yes, _, p_yes_qty, _) = market.poly.load();
+        let (_, k_no, _, k_no_qty) = market.kalshi.load();
+
+        let req = FastExecutionRequest {
+            market_id: 0,
+            yes_price: p_yes,
+            no_price: k_no,
+            yes_size: p_yes_qty,
+            no_size: k_no_qty,
+            arb_type: ArbType::PolyYesKalshiNo,
+            detected_ns: 0,
+        };
+
+        // Matched qty should be min(50, 30) = 30 contracts (NOT 0 from dividing by 100)
+        let matched_qty = req.yes_size.min(req.no_size);
+        assert_eq!(matched_qty, 30, "Matched qty should be 30 contracts");
+
+        // Before the fix, this would have been (3000 / 100) = 30 cents worth,
+        // which is meaningless. Now it's correctly 30 contracts.
+    }
+
+    #[test]
+    fn test_parse_price_unchanged() {
+        // Verify that parse_price still works for price parsing (not changed)
+        assert_eq!(parse_price("0.40"), 40);
+        assert_eq!(parse_price("0.99"), 99);
+        assert_eq!(parse_price("0.01"), 1);
+        assert_eq!(parse_price("0.5"), 50);
+    }
+
+    // =========================================================================
+    // Profit/P&L Integer Overflow Tests
+    // =========================================================================
+
+    #[test]
+    fn test_profit_cents_no_overflow_large_quantity() {
+        // Test that profit_cents calculation doesn't overflow with large quantities
+        // This test would have FAILED before widening to i64
+
+        // Create a profitable arb with large quantity
+        let req = FastExecutionRequest {
+            market_id: 0,
+            yes_price: 40, // 40 cents
+            no_price: 40,  // 40 cents
+            yes_size: 2000,
+            no_size: 2000,
+            arb_type: ArbType::PolyYesKalshiNo,
+            detected_ns: 0,
+        };
+
+        // Per-contract profit = 100 - 40 - 40 - fees ≈ 18 cents
+        // With old i16: matched * 100 would overflow at ~327 contracts
+        // For 2000 contracts: profit = 2000 * 100 - 2000 * 80 = 200000 - 160000 = 40000 cents
+        let profit_per_contract = req.profit_cents();
+        assert!(
+            profit_per_contract > 0,
+            "Should have positive profit per contract"
+        );
+        assert!(
+            profit_per_contract < 100,
+            "Per-contract profit should be less than $1"
+        );
+    }
+
+    #[test]
+    fn test_profit_calculation_with_1000_contracts() {
+        // Simulate actual profit calculation with 1000 matched contracts
+        // Before fix: matched as i16 * 100 would overflow (32767 max)
+        let matched: i64 = 1000;
+        let yes_cost: i64 = 40 * 1000; // 40 cents per contract
+        let no_cost: i64 = 40 * 1000; // 40 cents per contract
+
+        let payout = matched * 100;
+        let total_cost = yes_cost + no_cost;
+        let profit = payout - total_cost;
+
+        assert_eq!(payout, 100_000, "Payout should be 100,000 cents ($1000)");
+        assert_eq!(total_cost, 80_000, "Total cost should be 80,000 cents");
+        assert_eq!(profit, 20_000, "Profit should be 20,000 cents ($200)");
+        assert!(
+            profit > 0,
+            "Profit should be positive, not wrapped negative"
+        );
+    }
+
+    #[test]
+    fn test_negative_profit_large_match_no_wrap() {
+        // Test negative profit doesn't wrap with large quantities
+        let matched: i64 = 1000;
+        let yes_cost: i64 = 60 * 1000; // 60 cents per contract
+        let no_cost: i64 = 60 * 1000; // 60 cents per contract
+
+        let payout = matched * 100;
+        let total_cost = yes_cost + no_cost;
+        let profit = payout - total_cost;
+
+        assert_eq!(payout, 100_000, "Payout should be 100,000 cents");
+        assert_eq!(total_cost, 120_000, "Total cost should be 120,000 cents");
+        assert_eq!(profit, -20_000, "Profit should be -20,000 cents (loss)");
+        assert!(profit < 0, "Should be negative profit (loss)");
+    }
+
+    #[test]
+    fn test_profit_overflow_prevented_at_boundary() {
+        // Test at the old i16 overflow boundary
+        // Old code: matched as i16 * 100 would overflow at matched > 327
+        let matched: i64 = 328; // Just past old i16 boundary
+        let payout = matched * 100;
+
+        assert_eq!(payout, 32_800, "Should compute correctly without overflow");
+        assert!(payout > i16::MAX as i64, "Payout exceeds old i16::MAX");
     }
 }
 

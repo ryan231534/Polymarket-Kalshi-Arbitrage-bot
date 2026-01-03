@@ -29,7 +29,7 @@ use crate::execution::NanoClock;
 use crate::retry::{retry_async, RetryPolicy};
 use crate::types::{
     fxhash_str, ArbType, FastExecutionRequest, GlobalState, KalshiEvent, KalshiEventsResponse,
-    KalshiMarket, KalshiMarketsResponse, PriceCents, SizeCents,
+    KalshiMarket, KalshiMarketsResponse, PriceCents, QtyContracts,
 };
 
 // === Order Types ===
@@ -623,8 +623,8 @@ fn process_kalshi_snapshot(market: &crate::types::AtomicMarketState, body: &Kals
                 .max_by_key(|(p, _)| *p) // Highest bid
                 .map(|(price, qty)| {
                     let ask = (100 - price) as PriceCents; // To buy NO, pay 100 - YES_bid
-                    let size = (qty * price / 100) as SizeCents;
-                    (ask, size)
+                    let qty_contracts = qty as QtyContracts;
+                    (ask, qty_contracts)
                 })
         })
         .unwrap_or((0, 0));
@@ -646,8 +646,8 @@ fn process_kalshi_snapshot(market: &crate::types::AtomicMarketState, body: &Kals
                 .max_by_key(|(p, _)| *p)
                 .map(|(price, qty)| {
                     let ask = (100 - price) as PriceCents; // To buy YES, pay 100 - NO_bid
-                    let size = (qty * price / 100) as SizeCents;
-                    (ask, size)
+                    let qty_contracts = qty as QtyContracts;
+                    (ask, qty_contracts)
                 })
         })
         .unwrap_or((0, 0));
@@ -679,8 +679,8 @@ fn process_kalshi_delta(market: &crate::types::AtomicMarketState, body: &KalshiW
             .max_by_key(|(p, _)| *p)
             .map(|(price, qty)| {
                 let ask = (100 - price) as PriceCents;
-                let size = (qty * price / 100) as SizeCents;
-                (ask, size)
+                let qty_contracts = qty as QtyContracts;
+                (ask, qty_contracts)
             })
             .unwrap_or((current_no, current_no_size))
     } else {
@@ -701,8 +701,8 @@ fn process_kalshi_delta(market: &crate::types::AtomicMarketState, body: &KalshiW
             .max_by_key(|(p, _)| *p)
             .map(|(price, qty)| {
                 let ask = (100 - price) as PriceCents;
-                let size = (qty * price / 100) as SizeCents;
-                (ask, size)
+                let qty_contracts = qty as QtyContracts;
+                (ask, qty_contracts)
             })
             .unwrap_or((current_yes, current_yes_size))
     } else {

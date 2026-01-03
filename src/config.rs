@@ -24,9 +24,10 @@ pub const GAMMA_API_BASE: &str = "https://gamma-api.polymarket.com";
 #[allow(dead_code)]
 pub const ARB_THRESHOLD: f64 = 0.995;
 
-/// Default profit threshold in cents (100 cents = $1.00 = break-even)
-/// Set lower values for more aggressive arbitrage (e.g., 99 = 1% profit minimum)
-const DEFAULT_PROFIT_THRESHOLD_CENTS: u16 = 100;
+/// Default profit threshold in cents (98 cents = $0.98 = 2% minimum profit)
+/// Set lower values for more aggressive arbitrage (e.g., 95 = 5% profit minimum)
+/// Go-live setting: 98 cents ensures all arbs have at least 2% profit margin
+const DEFAULT_PROFIT_THRESHOLD_CENTS: u16 = 98;
 
 /// Default minimum profit in cents per contract (must be positive to execute)
 const DEFAULT_MIN_PROFIT_CENTS: u16 = 1;
@@ -111,12 +112,13 @@ pub fn enabled_leagues_from_env() -> Vec<String> {
 /// to be considered profitable:
 /// - 100 cents = break-even (buy YES + NO for exactly $1.00)
 /// - 99 cents = 1% minimum profit (buy YES + NO for $0.99)
+/// - 98 cents = 2% minimum profit (buy YES + NO for $0.98) [DEFAULT]
 /// - 95 cents = 5% minimum profit (buy YES + NO for $0.95)
 ///
 /// Configuration:
 /// - Reads from PROFIT_THRESHOLD_CENTS env var (integer cents: 1-100)
 /// - Falls back to ARB_THRESHOLD env var if set (legacy float: 0.01-1.00)
-/// - Uses DEFAULT_PROFIT_THRESHOLD_CENTS (100) if neither is set
+/// - Uses DEFAULT_PROFIT_THRESHOLD_CENTS (98) if neither is set
 ///
 /// The value is cached after first call for performance and consistency.
 ///
@@ -707,7 +709,23 @@ mod tests {
     #[test]
     fn test_profit_threshold_cents_default() {
         // This test cannot reliably set env vars due to caching,
-        // but we can verify the default constant
-        assert_eq!(DEFAULT_PROFIT_THRESHOLD_CENTS, 100);
+        // but we can verify the default constant (98 = 2% minimum profit)
+        assert_eq!(DEFAULT_PROFIT_THRESHOLD_CENTS, 98);
+    }
+
+    #[test]
+    fn test_default_threshold_is_98_cents() {
+        // Verify go-live default: 98 cents = 2% minimum profit margin
+        assert_eq!(
+            DEFAULT_PROFIT_THRESHOLD_CENTS, 98,
+            "Default threshold must be 98¢ for go-live"
+        );
+
+        // Verify conversion to profit percentage
+        let profit_pct = threshold_profit_percent(98);
+        assert!(
+            (profit_pct - 2.0).abs() < 0.01,
+            "98¢ threshold should be ~2% profit"
+        );
     }
 }

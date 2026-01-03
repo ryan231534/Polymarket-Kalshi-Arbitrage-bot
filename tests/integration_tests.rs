@@ -1323,10 +1323,15 @@ mod process_mock_tests {
         pair: &MarketPair,
         req: &FastExecutionRequest,
         result: MockExecutionResult,
-    ) -> (i64, i16) {
-        // Returns (matched, profit_cents)
+    ) -> (i64, i64) {
+        // Returns (matched, profit_cents) - widened to i64 to prevent overflow
         let matched = result.kalshi_filled.min(result.poly_filled);
-        let actual_profit = matched as i16 * 100 - (result.kalshi_cost + result.poly_cost) as i16;
+
+        // SAFETY: Widen to i64 BEFORE multiplication to prevent overflow
+        let matched_i64 = matched as i64;
+        let payout = matched_i64 * 100;
+        let total_cost = (result.kalshi_cost + result.poly_cost) as i64;
+        let actual_profit = payout - total_cost;
 
         // Determine sides for position tracking
         let (kalshi_side, poly_side) = match req.arb_type {

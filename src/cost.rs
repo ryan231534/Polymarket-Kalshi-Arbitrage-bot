@@ -247,10 +247,11 @@ pub fn expected_profit_total_cents(
     req: &FastExecutionRequest,
     contracts: u32,
     cfg: &AllInCfg,
-) -> i32 {
-    let payout = 100 * contracts;
-    let cost = all_in_cost_total_cents(req, contracts, cfg);
-    payout as i32 - cost as i32
+) -> i64 {
+    // Widen to i64 BEFORE multiplication to prevent overflow
+    let payout = 100i64 * contracts as i64;
+    let cost = all_in_cost_total_cents(req, contracts, cfg) as i64;
+    payout - cost
 }
 
 /// Result of all-in cost analysis for logging
@@ -259,8 +260,8 @@ pub struct AllInAnalysis {
     pub contracts: u32,
     pub all_in_cost_total: u32,
     pub cost_per_contract: u32,
-    pub profit_total: i32,
-    pub profit_per_contract: i32,
+    pub profit_total: i64,
+    pub profit_per_contract: i64,
     pub exec_threshold_cents: u16,
     pub min_profit_cents: u16,
     pub passes_threshold: bool,
@@ -295,13 +296,13 @@ pub fn analyze_all_in(
     };
 
     let profit_per_contract = if contracts > 0 {
-        profit_total / contracts as i32
+        profit_total / contracts as i64
     } else {
         0
     };
 
     let passes_threshold = cost_per_contract <= exec_threshold_cents as u32;
-    let passes_min_profit = profit_total >= (min_profit_cents as i32 * contracts as i32);
+    let passes_min_profit = profit_total >= (min_profit_cents as i64 * contracts as i64);
 
     AllInAnalysis {
         contracts,

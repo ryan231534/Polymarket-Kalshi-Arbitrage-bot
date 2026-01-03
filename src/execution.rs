@@ -12,8 +12,7 @@ use tracing::{error, info, warn};
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::config::{execution_threshold_cents, min_profit_cents};
-use crate::cost::{analyze_all_in, AllInCfg};
-use crate::fees::{Exchange, FeeModel};
+use crate::fees::{AllInCostModel, CostMode, Exchange, FeeModel};
 use crate::kalshi::KalshiApiClient;
 use crate::metrics::Metrics;
 use crate::mismatch::handle_mismatch;
@@ -60,6 +59,7 @@ pub struct ExecutionEngine {
     position_channel: PositionChannel,
     pnl_tracker: Arc<Mutex<PnLTracker>>,
     fee_model: Arc<FeeModel>,
+    cost_model: AllInCostModel,
     metrics: Arc<Metrics>,
     in_flight: Arc<[AtomicU64; 8]>,
     clock: NanoClock,
@@ -83,6 +83,11 @@ impl ExecutionEngine {
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false);
 
+        // Create unified cost model from fee model
+        use crate::config::kalshi_fee_role;
+        let kalshi_role = kalshi_fee_role();
+        let cost_model = AllInCostModel::new(fee_model.clone(), kalshi_role);
+
         Self {
             kalshi,
             poly_async,
@@ -91,6 +96,7 @@ impl ExecutionEngine {
             position_channel,
             pnl_tracker,
             fee_model,
+            cost_model,
             metrics,
             in_flight: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
             clock: NanoClock::new(),
@@ -127,7 +133,7 @@ impl ExecutionEngine {
             .get_by_id(market_id)
             .ok_or_else(|| anyhow!("Unknown market_id {}", market_id))?;
 
-        let pair = market
+        let _pair = market
             .pair
             .as_ref()
             .ok_or_else(|| anyhow!("No pair for market_id {}", market_id))?;
@@ -174,8 +180,8 @@ impl ExecutionEngine {
             });
         }
 
-        // Calculate max contracts from size (min of both sides, limited by sizing)
-        let liquidity_contracts = (req.yes_size.min(req.no_size) / 100) as i64;
+        // Calculate max contracts from quantity (min of both sides, limited by sizing)
+        let liquidity_contracts = req.yes_size.min(req.no_size) as i64;
         let mut max_contracts = liquidity_contracts.min(sizing_decision.qty as i64);
 
         // Safety: In test mode, cap position size at 10 contracts
@@ -192,7 +198,7 @@ impl ExecutionEngine {
 
         if max_contracts < 1 {
             warn!(
-                "[EXEC] Liquidity fail: {:?} | yes_size={}¢ no_size={}¢",
+                "[EXEC] Liquidity fail: {:?} | yes_size={} contracts, no_size={} contracts",
                 req.arb_type, req.yes_size, req.no_size
             );
             self.release_in_flight(market_id);
@@ -205,40 +211,66 @@ impl ExecutionEngine {
             });
         }
 
-        // === All-In Cost Gate ===
-        // Compute accurate fees (Kalshi + Poly), slippage, and expected profit
-        // This is the FINAL profitability check before execution
-        let all_in_cfg = AllInCfg::from_env();
+        // === All-In Cost Gate (Unified Model) ===
+        // Use unified AllInCostModel for consistent fee calculations
+        // This replaces old AllInCfg and uses cached Polymarket fees
         let exec_threshold = execution_threshold_cents();
         let min_profit = min_profit_cents();
-        let analysis = analyze_all_in(
-            &req,
-            max_contracts as u32,
-            &all_in_cfg,
-            exec_threshold,
-            min_profit,
+
+        // Get token IDs for Polymarket fee lookup
+        let pair = market.pair.as_ref().unwrap();
+        let poly_yes_token = pair.poly_yes_token.as_ref();
+        let poly_no_token = pair.poly_no_token.as_ref();
+
+        // Compute all-in cost using unified model (ExecutionTruth mode)
+        let (leg1_cost, leg2_cost, total_cost) = self.cost_model.compute_arb_cost(
+            req.arb_type,
+            req.yes_price as i64,
+            req.no_price as i64,
+            max_contracts as i64,
+            poly_yes_token,
+            poly_no_token,
+            CostMode::ExecutionTruth,
         );
 
-        if !analysis.passes_threshold || !analysis.passes_min_profit {
+        let cost_per_contract = if max_contracts > 0 {
+            (total_cost / max_contracts as i64) as u32
+        } else {
+            0
+        };
+
+        // Expected profit: payout - total_cost
+        let payout = max_contracts as i64 * 100;
+        let profit_total = payout - total_cost;
+        let profit_per_contract = if max_contracts > 0 {
+            profit_total / max_contracts as i64
+        } else {
+            0
+        };
+
+        let passes_threshold = cost_per_contract <= exec_threshold as u32;
+        let passes_min_profit = profit_total >= (min_profit as i64 * max_contracts as i64);
+
+        if !passes_threshold || !passes_min_profit {
             // Structured rejection event with full cost breakdown
             info!(
                 event = "exec_rejected_all_in",
                 market_id = market_id,
                 arb_type = ?req.arb_type,
-                contracts = analysis.contracts,
-                all_in_cost_total = analysis.all_in_cost_total,
-                cost_per_contract = analysis.cost_per_contract,
-                profit_total = analysis.profit_total,
-                profit_per_contract = analysis.profit_per_contract,
-                exec_threshold_cents = analysis.exec_threshold_cents,
-                min_profit_cents = analysis.min_profit_cents,
-                passes_threshold = analysis.passes_threshold,
-                passes_min_profit = analysis.passes_min_profit,
-                slippage_cents_per_leg = all_in_cfg.slippage_cents_per_leg,
-                kalshi_role = ?all_in_cfg.kalshi_role,
-                poly_maker_bps = all_in_cfg.poly_maker_bps,
-                poly_taker_bps = all_in_cfg.poly_taker_bps,
-                "Rejected by all-in cost model"
+                contracts = max_contracts,
+                total_cost = total_cost,
+                cost_per_contract = cost_per_contract,
+                leg1_cost = leg1_cost.total_cents,
+                leg1_fee = leg1_cost.fee_cents,
+                leg2_cost = leg2_cost.total_cents,
+                leg2_fee = leg2_cost.fee_cents,
+                profit_total = profit_total,
+                profit_per_contract = profit_per_contract,
+                exec_threshold_cents = exec_threshold,
+                min_profit_cents = min_profit,
+                passes_threshold = passes_threshold,
+                passes_min_profit = passes_min_profit,
+                "Rejected by unified cost model"
             );
 
             self.release_in_flight(market_id);
@@ -247,7 +279,7 @@ impl ExecutionEngine {
                 success: false,
                 profit_cents: 0,
                 latency_ns: self.clock.now_ns() - req.detected_ns,
-                error: Some(if !analysis.passes_threshold {
+                error: Some(if !passes_threshold {
                     "All-in cost exceeds threshold"
                 } else {
                     "Profit below minimum"
@@ -328,7 +360,13 @@ impl ExecutionEngine {
             Ok((yes_filled, no_filled, yes_cost, no_cost, yes_order_id, no_order_id)) => {
                 let matched = yes_filled.min(no_filled);
                 let success = matched > 0;
-                let actual_profit = matched as i16 * 100 - (yes_cost + no_cost) as i16;
+
+                // SAFETY: Widen to i64 BEFORE multiplication to prevent overflow
+                // For large matched quantities (e.g., 1000 contracts), matched * 100 would overflow i16
+                let matched_i64 = matched as i64;
+                let payout = matched_i64 * 100;
+                let total_cost = (yes_cost + no_cost) as i64;
+                let actual_profit = payout - total_cost;
 
                 // === Automatic exposure management for mismatched fills ===
                 // If one leg fills more than the other, use the mismatch playbook
@@ -871,8 +909,8 @@ pub struct ExecutionResult {
     pub market_id: u16,
     /// Whether execution was successful
     pub success: bool,
-    /// Realized profit in cents
-    pub profit_cents: i16,
+    /// Realized profit in cents (widened to i64 to prevent overflow)
+    pub profit_cents: i64,
     /// Total latency from detection to completion in nanoseconds
     pub latency_ns: u64,
     /// Error message if execution failed

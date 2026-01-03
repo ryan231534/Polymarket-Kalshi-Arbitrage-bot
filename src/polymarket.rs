@@ -17,7 +17,7 @@ use crate::config::{GAMMA_API_BASE, POLYMARKET_WS_URL, POLY_PING_INTERVAL_SECS};
 use crate::execution::NanoClock;
 use crate::retry::{retry_async, RetryPolicy};
 use crate::types::{
-    fxhash_str, parse_price, ArbType, FastExecutionRequest, GlobalState, PriceCents, SizeCents,
+    fxhash_str, parse_price, ArbType, FastExecutionRequest, GlobalState, PriceCents, QtyContracts,
 };
 
 // === WebSocket Message Types ===
@@ -201,12 +201,13 @@ fn increment_date_in_slug(slug: &str) -> Option<String> {
 // WebSocket Runner
 // =============================================================================
 
-/// Parse size from Polymarket (format: "123.45" dollars)
+/// Parse quantity from Polymarket (format: "12.34" contracts/shares)
+/// Floor the decimal to get integer quantity. If result is 0, return 0.
 #[inline(always)]
-fn parse_size(s: &str) -> SizeCents {
-    // Parse as f64 and convert to cents
+fn parse_size(s: &str) -> QtyContracts {
+    // Parse as f64 and floor to get integer quantity
     s.parse::<f64>()
-        .map(|size| (size * 100.0).round() as SizeCents)
+        .map(|qty| qty.floor() as QtyContracts)
         .unwrap_or(0)
 }
 
@@ -470,4 +471,43 @@ async fn send_arb_request(
 
     // send! ~~
     let _ = exec_tx.try_send(req);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_size_quantity_semantics() {
+        // Test that parse_size treats input as quantity (contracts/shares), not dollars
+        // This test would have FAILED before the fix
+
+        // Input "12.34" should be parsed as 12.34 contracts, floored to 12
+        assert_eq!(parse_size("12.34"), 12);
+
+        // Input "0.99" should be parsed as 0.99 contracts, floored to 0
+        assert_eq!(parse_size("0.99"), 0);
+
+        // Input "1.0" should be parsed as 1 contract
+        assert_eq!(parse_size("1.0"), 1);
+
+        // Input "100.5" should be parsed as 100 contracts
+        assert_eq!(parse_size("100.5"), 100);
+
+        // Input "50" should be parsed as 50 contracts
+        assert_eq!(parse_size("50"), 50);
+
+        // Invalid input should return 0
+        assert_eq!(parse_size("invalid"), 0);
+        assert_eq!(parse_size(""), 0);
+    }
+
+    #[test]
+    fn test_parse_size_no_cents_conversion() {
+        // Before the fix, parse_size("12.34") would return 1234 (12.34 * 100)
+        // Now it should return 12 (floor of 12.34 contracts)
+        let result = parse_size("12.34");
+        assert_eq!(result, 12, "Should NOT multiply by 100");
+        assert_ne!(result, 1234, "Old buggy behavior multiplied by 100");
+    }
 }
