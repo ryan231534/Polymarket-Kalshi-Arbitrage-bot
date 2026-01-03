@@ -292,8 +292,19 @@ impl AtomicMarketState {
     }
 }
 
-/// Precomputed Kalshi trading fee lookup table (101 entries for prices 0-100 cents).
-/// Fee formula: ceil(0.07 × P × (1-P)) in cents, where P is price in cents.
+/// Precomputed Kalshi trading fee lookup table for SINGLE-CONTRACT trades (HOT PATH OPTIMIZATION).
+///
+/// **SOURCE OF TRUTH**: This table is derived from the canonical formula in cost::kalshi_fee_total_cents().
+/// Fee formula: ceil(7 × P × (100-P) / 10000) in cents, where P is price in cents.
+///
+/// **VALIDATION**: tests/fee_table_validation.rs ensures this table exactly matches the formula
+/// for single-contract trades with Taker role.
+///
+/// **WARNING**: This table is ONLY accurate for single contracts. For multi-contract trades,
+/// per-contract rounding errors accumulate. Always use FeeModel::estimate_fees() or
+/// cost::kalshi_fee_total_cents() for actual execution fee calculation.
+///
+/// **USE CASE**: The table is used in SIMD hot-path arbitrage detection where speed is critical.
 static KALSHI_FEE_TABLE: [u16; 101] = {
     let mut table = [0u16; 101];
     let mut p = 1u32;
@@ -307,6 +318,10 @@ static KALSHI_FEE_TABLE: [u16; 101] = {
 };
 
 /// Calculate Kalshi trading fee in cents for a single contract at the given price.
+///
+/// WARNING: Hot-path helper for single-contract arbitrage detection ONLY.
+/// For multi-contract execution, use FeeModel::estimate_fees() or cost::kalshi_fee_total_cents().
+///
 /// For typical prices (10-90 cents), fees are usually 1-2 cents per contract.
 #[inline(always)]
 pub fn kalshi_fee_cents(price_cents: PriceCents) -> PriceCents {
