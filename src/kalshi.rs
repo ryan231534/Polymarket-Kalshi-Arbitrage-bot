@@ -26,6 +26,7 @@ use tracing::{debug, error, info};
 
 use crate::config::{KALSHI_API_BASE, KALSHI_API_DELAY_MS, KALSHI_WS_URL};
 use crate::execution::NanoClock;
+use crate::retry::{retry_async, RetryPolicy};
 use crate::types::{
     fxhash_str, ArbType, FastExecutionRequest, GlobalState, KalshiEvent, KalshiEventsResponse,
     KalshiMarket, KalshiMarketsResponse, PriceCents, SizeCents,
@@ -219,6 +220,7 @@ static ORDER_COUNTER: AtomicU32 = AtomicU32::new(0);
 pub struct KalshiApiClient {
     http: reqwest::Client,
     pub config: KalshiConfig,
+    retry_policy: RetryPolicy,
 }
 
 impl KalshiApiClient {
@@ -229,6 +231,7 @@ impl KalshiApiClient {
                 .build()
                 .expect("Failed to build HTTP client"),
             config,
+            retry_policy: RetryPolicy::from_env(),
         }
     }
 
@@ -244,58 +247,48 @@ impl KalshiApiClient {
         buf
     }
 
-    /// Generic authenticated GET request with retry on rate limit
+    /// Generic authenticated GET request with retry
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let mut retries = 0;
-        const MAX_RETRIES: u32 = 5;
+        let path_owned = path.to_string();
+        let result = retry_async(&self.retry_policy, "kalshi_get", || {
+            let path = path_owned.clone();
+            let http = self.http.clone();
+            let api_key_id = self.config.api_key_id.clone();
+            async move {
+                let url = format!("{}{}", KALSHI_API_BASE, path);
+                let timestamp_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+                // Kalshi signature uses FULL path including /trade-api/v2 prefix
+                let full_path = format!("/trade-api/v2{}", path);
+                let signature = self
+                    .config
+                    .sign(&format!("{}GET{}", timestamp_ms, full_path))?;
 
-        loop {
-            let url = format!("{}{}", KALSHI_API_BASE, path);
-            let timestamp_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
-            // Kalshi signature uses FULL path including /trade-api/v2 prefix
-            let full_path = format!("/trade-api/v2{}", path);
-            let signature = self
-                .config
-                .sign(&format!("{}GET{}", timestamp_ms, full_path))?;
+                let resp = http
+                    .get(&url)
+                    .header("KALSHI-ACCESS-KEY", &api_key_id)
+                    .header("KALSHI-ACCESS-SIGNATURE", &signature)
+                    .header("KALSHI-ACCESS-TIMESTAMP", timestamp_ms.to_string())
+                    .send()
+                    .await?;
 
-            let resp = self
-                .http
-                .get(&url)
-                .header("KALSHI-ACCESS-KEY", &self.config.api_key_id)
-                .header("KALSHI-ACCESS-SIGNATURE", &signature)
-                .header("KALSHI-ACCESS-TIMESTAMP", timestamp_ms.to_string())
-                .send()
-                .await?;
-
-            let status = resp.status();
-
-            // Handle rate limit with exponential backoff
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                retries += 1;
-                if retries > MAX_RETRIES {
-                    anyhow::bail!("Kalshi API rate limited after {} retries", MAX_RETRIES);
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = resp.text().await.unwrap_or_default();
+                    anyhow::bail!("Kalshi API error {}: {}", status, body);
                 }
-                let backoff_ms = 2000 * (1 << retries); // 4s, 8s, 16s, 32s, 64s
-                debug!(
-                    "[KALSHI] Rate limited, backing off {}ms (retry {}/{})",
-                    backoff_ms, retries, MAX_RETRIES
-                );
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                continue;
-            }
 
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                anyhow::bail!("Kalshi API error {}: {}", status, body);
+                let data: T = resp.json().await?;
+                Ok(data)
             }
+        })
+        .await?;
 
-            let data: T = resp.json().await?;
-            tokio::time::sleep(Duration::from_millis(KALSHI_API_DELAY_MS)).await;
-            return Ok(data);
-        }
+        // Rate limiting delay after successful request
+        tokio::time::sleep(Duration::from_millis(KALSHI_API_DELAY_MS)).await;
+        Ok(result)
     }
 
     pub async fn get_events(&self, series_ticker: &str, limit: u32) -> Result<Vec<KalshiEvent>> {

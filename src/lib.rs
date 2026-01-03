@@ -20,5 +20,6 @@ pub mod polymarket;
 pub mod polymarket_clob;
 pub mod position_tracker;
 pub mod prefetch;
+pub mod retry;
 pub mod risk;
 pub mod types;
