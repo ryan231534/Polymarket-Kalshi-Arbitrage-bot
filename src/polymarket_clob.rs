@@ -5,12 +5,12 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, anyhow};
-use base64::Engine;
+use anyhow::{anyhow, Result};
 use base64::engine::general_purpose::URL_SAFE;
+use base64::Engine;
 use ethers::signers::{LocalWallet, Signer};
-use ethers::types::H256;
 use ethers::types::transaction::eip712::{Eip712, TypedData};
+use ethers::types::H256;
 use ethers::types::U256;
 use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -107,7 +107,10 @@ fn add_default_headers(headers: &mut HeaderMap) {
 
 #[inline(always)]
 fn current_unix_ts() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 fn clob_auth_digest(chain_id: u64, address_str: &str, timestamp: u64, nonce: u64) -> Result<H256> {
@@ -159,34 +162,34 @@ struct OrderData<'a> {
     signer: &'a str,
     expiration: &'a str,
     signature_type: i32,
-    salt: u128
+    salt: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OrderStruct {
-    pub salt: u128, 
-    pub maker: String, 
-    pub signer: String, 
+    pub salt: u128,
+    pub maker: String,
+    pub signer: String,
     pub taker: String,
-    #[serde(rename = "tokenId")] 
+    #[serde(rename = "tokenId")]
     pub token_id: String,
-    #[serde(rename = "makerAmount")] 
+    #[serde(rename = "makerAmount")]
     pub maker_amount: String,
-    #[serde(rename = "takerAmount")] 
+    #[serde(rename = "takerAmount")]
     pub taker_amount: String,
-    pub expiration: String, 
+    pub expiration: String,
     pub nonce: String,
-    #[serde(rename = "feeRateBps")] 
+    #[serde(rename = "feeRateBps")]
     pub fee_rate_bps: String,
     pub side: i32,
-    #[serde(rename = "signatureType")] 
+    #[serde(rename = "signatureType")]
     pub signature_type: i32,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SignedOrder { 
-    pub order: OrderStruct, 
-    pub signature: String 
+pub struct SignedOrder {
+    pub order: OrderStruct,
+    pub signature: String,
 }
 
 impl SignedOrder {
@@ -230,7 +233,11 @@ impl SignedOrder {
 
 #[inline(always)]
 fn generate_seed() -> u128 {
-    (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() % u128::from(u32::MAX)) as u128
+    (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        % u128::from(u32::MAX)) as u128
 }
 
 // ============================================================================
@@ -386,9 +393,9 @@ pub struct PolymarketOrderResponse {
     #[serde(default)]
     pub associate_trades: Vec<serde_json::Value>,
     #[serde(default)]
-    pub created_at: Option<serde_json::Value>,  // Can be string or integer
+    pub created_at: Option<serde_json::Value>, // Can be string or integer
     #[serde(default)]
-    pub expiration: Option<serde_json::Value>,  // Can be string or integer
+    pub expiration: Option<serde_json::Value>, // Can be string or integer
     #[serde(rename = "type")]
     pub order_type: Option<String>,
     pub owner: Option<String>,
@@ -402,7 +409,7 @@ pub struct PolymarketOrderResponse {
 pub struct PolymarketAsyncClient {
     host: String,
     chain_id: u64,
-    http: reqwest::Client,  // Async client with connection pooling
+    http: reqwest::Client, // Async client with connection pooling
     wallet: Arc<LocalWallet>,
     funder: String,
     wallet_address_str: String,
@@ -444,8 +451,14 @@ impl PolymarketAsyncClient {
         let sig = self.wallet.sign_hash(digest)?;
         let mut headers = HeaderMap::new();
         headers.insert("POLY_ADDRESS", self.address_header.clone());
-        headers.insert("POLY_SIGNATURE", HeaderValue::from_str(&format!("0x{}", sig))?);
-        headers.insert("POLY_TIMESTAMP", HeaderValue::from_str(&timestamp.to_string())?);
+        headers.insert(
+            "POLY_SIGNATURE",
+            HeaderValue::from_str(&format!("0x{}", sig))?,
+        );
+        headers.insert(
+            "POLY_TIMESTAMP",
+            HeaderValue::from_str(&timestamp.to_string())?,
+        );
         headers.insert("POLY_NONCE", HeaderValue::from_str(&nonce.to_string())?);
         add_default_headers(&mut headers);
         Ok(headers)
@@ -465,30 +478,46 @@ impl PolymarketAsyncClient {
     }
 
     /// Build L2 headers for authenticated requests
-    fn build_l2_headers(&self, method: &str, path: &str, body: Option<&str>, creds: &PreparedCreds) -> Result<HeaderMap> {
+    fn build_l2_headers(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        creds: &PreparedCreds,
+    ) -> Result<HeaderMap> {
         let timestamp = current_unix_ts();
         let mut message = format!("{}{}{}", timestamp, method, path);
-        if let Some(b) = body { message.push_str(b); }
+        if let Some(b) = body {
+            message.push_str(b);
+        }
 
         let sig_b64 = creds.sign_b64(message.as_bytes());
 
         let mut headers = HeaderMap::with_capacity(9);
         headers.insert("POLY_ADDRESS", self.address_header.clone());
         headers.insert("POLY_SIGNATURE", HeaderValue::from_str(&sig_b64)?);
-        headers.insert("POLY_TIMESTAMP", HeaderValue::from_str(&timestamp.to_string())?);
+        headers.insert(
+            "POLY_TIMESTAMP",
+            HeaderValue::from_str(&timestamp.to_string())?,
+        );
         headers.insert("POLY_API_KEY", creds.api_key_header());
         headers.insert("POLY_PASSPHRASE", creds.passphrase_header());
         add_default_headers(&mut headers);
         Ok(headers)
     }
 
-    /// Post order 
-    pub async fn post_order_async(&self, body: String, creds: &PreparedCreds) -> Result<reqwest::Response> {
+    /// Post order
+    pub async fn post_order_async(
+        &self,
+        body: String,
+        creds: &PreparedCreds,
+    ) -> Result<reqwest::Response> {
         let path = "/order";
         let url = format!("{}{}", self.host, path);
         let headers = self.build_l2_headers("POST", path, Some(&body), creds)?;
 
-        let resp = self.http
+        let resp = self
+            .http
             .post(&url)
             .headers(headers)
             .body(body)
@@ -498,17 +527,17 @@ impl PolymarketAsyncClient {
         Ok(resp)
     }
 
-    /// Get order by ID 
-    pub async fn get_order_async(&self, order_id: &str, creds: &PreparedCreds) -> Result<PolymarketOrderResponse> {
+    /// Get order by ID
+    pub async fn get_order_async(
+        &self,
+        order_id: &str,
+        creds: &PreparedCreds,
+    ) -> Result<PolymarketOrderResponse> {
         let path = format!("/data/order/{}", order_id);
         let url = format!("{}{}", self.host, path);
         let headers = self.build_l2_headers("GET", &path, None, creds)?;
 
-        let resp = self.http
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await?;
+        let resp = self.http.get(&url).headers(headers).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -522,7 +551,8 @@ impl PolymarketAsyncClient {
     /// Check neg_risk for token - with caching
     pub async fn check_neg_risk(&self, token_id: &str) -> Result<bool> {
         let url = format!("{}/neg-risk?token_id={}", self.host, token_id);
-        let resp = self.http
+        let resp = self
+            .http
             .get(&url)
             .header("User-Agent", USER_AGENT)
             .send()
@@ -577,7 +607,7 @@ impl SharedAsyncClient {
         Ok(count)
     }
 
-    /// Execute FAK buy order - 
+    /// Execute FAK buy order -
     pub async fn buy_fak(&self, token_id: &str, price: f64, size: f64) -> Result<PolyFillAsync> {
         debug_assert!(!token_id.is_empty(), "token_id must not be empty");
         debug_assert!(price > 0.0 && price < 1.0, "price must be 0 < p < 1");
@@ -585,7 +615,7 @@ impl SharedAsyncClient {
         self.execute_order(token_id, price, size, "BUY").await
     }
 
-    /// Execute FAK sell order - 
+    /// Execute FAK sell order -
     pub async fn sell_fak(&self, token_id: &str, price: f64, size: f64) -> Result<PolyFillAsync> {
         debug_assert!(!token_id.is_empty(), "token_id must not be empty");
         debug_assert!(price > 0.0 && price < 1.0, "price must be 0 < p < 1");
@@ -593,7 +623,13 @@ impl SharedAsyncClient {
         self.execute_order(token_id, price, size, "SELL").await
     }
 
-    async fn execute_order(&self, token_id: &str, price: f64, size: f64, side: &str) -> Result<PolyFillAsync> {
+    async fn execute_order(
+        &self,
+        token_id: &str,
+        price: f64,
+        size: f64,
+        side: &str,
+    ) -> Result<PolyFillAsync> {
         // Check neg_risk cache first
         let neg_risk = {
             let cache = self.neg_risk_cache.read().unwrap();
@@ -625,7 +661,10 @@ impl SharedAsyncClient {
         }
 
         let resp_json: serde_json::Value = resp.json().await?;
-        let order_id = resp_json["orderID"].as_str().unwrap_or("unknown").to_string();
+        let order_id = resp_json["orderID"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
 
         // Query fill status
         let order_info = self.inner.get_order_async(&order_id, &self.creds).await?;
@@ -634,7 +673,12 @@ impl SharedAsyncClient {
 
         tracing::debug!(
             "[POLY-ASYNC] FAK {} {}: status={}, filled={:.2}/{:.2}, price={:.4}",
-            side, order_id, order_info.status, filled_size, size, order_price
+            side,
+            order_id,
+            order_info.status,
+            filled_size,
+            size,
+            order_price
         );
 
         Ok(PolyFillAsync {
@@ -657,7 +701,11 @@ impl SharedAsyncClient {
         let size_micro = size_to_micro(size);
 
         if !price_valid(price_bps) {
-            return Err(anyhow!("price {} ({}bps) outside allowed range", price, price_bps));
+            return Err(anyhow!(
+                "price {} ({}bps) outside allowed range",
+                price,
+                price_bps
+            ));
         }
 
         let (side_code, maker_amt, taker_amt) = if side.eq_ignore_ascii_case("BUY") {
@@ -672,7 +720,7 @@ impl SharedAsyncClient {
         let maker_amount_str = maker_amt.to_string();
         let taker_amount_str = taker_amt.to_string();
 
-        // Use references for EIP712 signing 
+        // Use references for EIP712 signing
         let data = OrderData {
             maker: &self.inner.funder,
             taker: ZERO_ADDRESS,

@@ -129,6 +129,120 @@ DRY_RUN=0 dotenvx run -- cargo run --release
 | `CB_MAX_CONSECUTIVE_ERRORS`  | `5`     | Consecutive errors before halt              |
 | `CB_COOLDOWN_SECS`           | `60`    | Cooldown period after circuit breaker trips |
 
+### P&L Tracking
+
+| Variable          | Default  | Description                                                |
+| ----------------- | -------- | ---------------------------------------------------------- |
+| `PNL_DIR`         | `./data` | Directory for P&L event ledger and snapshots               |
+| `PNL_FLUSH_SECS`  | `10`     | Seconds between automatic snapshot saves                   |
+
+#### P&L Files
+
+The P&L system writes two files to the `PNL_DIR` directory:
+
+- **`pnl_events.jsonl`**: Append-only event ledger (one JSON per line)
+- **`pnl_snapshot.json`**: Periodic snapshot for fast recovery on restart
+
+#### Event Ledger Format (JSONL)
+
+```json
+{"type":"order_fill","ts_ms":1704153600000,"venue":"kalshi","market_key":"epl:ars-mun:moneyline","order_id":"order123","side":"buy","contract_side":"yes","qty":10,"price_cents":45,"fee_cents":2}
+```
+
+#### Snapshot Format
+
+```json
+{
+  "ts_ms": 1704153600000,
+  "total_realized_pnl_cents": 500,
+  "total_unrealized_pnl_cents": 150,
+  "total_fees_paid_cents": 20,
+  "total_net_pnl_cents": 650,
+  "by_venue": [
+    {"venue": "kalshi", "realized_pnl_cents": 300, "net_pnl_cents": 400}
+  ],
+  "by_market": [...]
+}
+```
+
+#### Heartbeat P&L Output
+
+Every 60 seconds, the heartbeat log includes P&L summary:
+
+```
+💓 System heartbeat | Markets: 14 total | threshold=100¢
+   💰 P&L: realized=500¢ unrealized=150¢ fees=20¢ net=650¢
+```
+
+---
+
+## Logging & Monitoring
+
+The bot includes institutional-grade structured logging with JSON support for production monitoring and alerting.
+
+### Configuration
+
+Configure logging via environment variables:
+
+```bash
+# Log format: pretty (default) or json
+LOG_FORMAT=json
+
+# Log directory (default: ./logs)
+LOG_DIR=/var/log/arb_bot
+
+# Log level (default: info)
+RUST_LOG=info
+
+# Optional: Override run ID for correlation
+RUN_ID=<uuid>
+```
+
+### Structured Events
+
+The bot emits structured events with consistent field names for monitoring:
+
+| Event | Description | Key Fields |
+|-------|-------------|------------|
+| `heartbeat` | System health (every 60s) | `markets_total`, `pnl_*_cents`, `open_positions` |
+| `exec_attempt` | Arbitrage execution started | `market_id`, `arb_type`, `profit_cents`, `latency_us` |
+| `exec_result` | Execution completed | `success`, `matched`, `actual_profit_cents` |
+| `fill_mismatch` | Unbalanced fills detected | `yes_filled`, `no_filled`, `excess` |
+| `pnl_fill` | Fill recorded in P&L tracker | `venue`, `qty`, `price_cents`, `fee_cents` |
+| `ws_error` | WebSocket connection error | `venue`, `error` |
+| `ws_reconnect` | WebSocket reconnecting | `venue`, `delay_secs` |
+
+### Querying JSON Logs
+
+```bash
+# Find all execution attempts
+cat logs/arb_bot.log.* | jq 'select(.event == "exec_attempt")'
+
+# Track system health
+cat logs/arb_bot.log.* | jq 'select(.event == "heartbeat") | {timestamp, markets_total, pnl_net_cents}'
+
+# Find WebSocket errors
+cat logs/arb_bot.log.* | jq 'select(.event == "ws_error")'
+
+# Calculate success rate
+cat logs/arb_bot.log.* | jq -s 'map(select(.event == "exec_result")) | {total: length, success: map(select(.success)) | length}'
+```
+
+### Production Examples
+
+```bash
+# JSON logs with daily rotation
+LOG_FORMAT=json LOG_DIR=/var/log/arb_bot RUST_LOG=info DRY_RUN=0 cargo run --release
+
+# Pretty console + JSON file
+LOG_FORMAT=pretty LOG_DIR=/var/log/arb_bot cargo run --release
+
+# Development debugging
+RUST_LOG=debug cargo run --release
+```
+
+For complete logging documentation, see [STRUCTURED_LOGGING.md](STRUCTURED_LOGGING.md).
+
 ---
 
 ## Obtaining Credentials

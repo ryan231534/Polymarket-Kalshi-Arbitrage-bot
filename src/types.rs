@@ -3,10 +3,10 @@
 //! This module provides the foundational types for market state management,
 //! orderbook representation, and arbitrage opportunity detection.
 
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use rustc_hash::FxHashMap;
 
 // === Market Types ===
 
@@ -76,8 +76,16 @@ pub const NO_PRICE: PriceCents = 0;
 /// Pack orderbook state into a single u64 for atomic operations.
 /// Bit layout: [yes_ask:16][no_ask:16][yes_size:16][no_size:16]
 #[inline(always)]
-pub fn pack_orderbook(yes_ask: PriceCents, no_ask: PriceCents, yes_size: SizeCents, no_size: SizeCents) -> u64 {
-    ((yes_ask as u64) << 48) | ((no_ask as u64) << 32) | ((yes_size as u64) << 16) | (no_size as u64)
+pub fn pack_orderbook(
+    yes_ask: PriceCents,
+    no_ask: PriceCents,
+    yes_size: SizeCents,
+    no_size: SizeCents,
+) -> u64 {
+    ((yes_ask as u64) << 48)
+        | ((no_ask as u64) << 32)
+        | ((yes_size as u64) << 16)
+        | (no_size as u64)
 }
 
 /// Unpack a u64 orderbook representation back into its component values
@@ -100,7 +108,9 @@ pub struct AtomicOrderbook {
 
 impl AtomicOrderbook {
     pub const fn new() -> Self {
-        Self { packed: AtomicU64::new(0) }
+        Self {
+            packed: AtomicU64::new(0),
+        }
     }
 
     /// Load current state
@@ -111,8 +121,17 @@ impl AtomicOrderbook {
 
     /// Store new state
     #[inline(always)]
-    pub fn store(&self, yes_ask: PriceCents, no_ask: PriceCents, yes_size: SizeCents, no_size: SizeCents) {
-        self.packed.store(pack_orderbook(yes_ask, no_ask, yes_size, no_size), Ordering::Release);
+    pub fn store(
+        &self,
+        yes_ask: PriceCents,
+        no_ask: PriceCents,
+        yes_size: SizeCents,
+        no_size: SizeCents,
+    ) {
+        self.packed.store(
+            pack_orderbook(yes_ask, no_ask, yes_size, no_size),
+            Ordering::Release,
+        );
     }
 
     /// Update YES side only
@@ -122,7 +141,12 @@ impl AtomicOrderbook {
         loop {
             let (_, no_ask, _, no_size) = unpack_orderbook(current);
             let new = pack_orderbook(yes_ask, no_ask, yes_size, no_size);
-            match self.packed.compare_exchange_weak(current, new, Ordering::AcqRel, Ordering::Acquire) {
+            match self.packed.compare_exchange_weak(
+                current,
+                new,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => break,
                 Err(c) => current = c,
             }
@@ -136,7 +160,12 @@ impl AtomicOrderbook {
         loop {
             let (yes_ask, _, yes_size, _) = unpack_orderbook(current);
             let new = pack_orderbook(yes_ask, no_ask, yes_size, no_size);
-            match self.packed.compare_exchange_weak(current, new, Ordering::AcqRel, Ordering::Acquire) {
+            match self.packed.compare_exchange_weak(
+                current,
+                new,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => break,
                 Err(c) => current = c,
             }
@@ -191,17 +220,28 @@ impl AtomicMarketState {
             (k_yes + k_yes_fee + p_no) as i16,
             (p_yes + p_no) as i16,
             (k_yes + k_yes_fee + k_no + k_no_fee) as i16,
-            i16::MAX, i16::MAX, i16::MAX, i16::MAX,
+            i16::MAX,
+            i16::MAX,
+            i16::MAX,
+            i16::MAX,
         ]);
 
         let cmp = costs.cmp_lt(i16x8::splat(threshold_cents as i16));
         let arr = cmp.to_array();
 
         let mut mask = 0u8;
-        if arr[0] != 0 { mask |= 1; }
-        if arr[1] != 0 { mask |= 2; }
-        if arr[2] != 0 { mask |= 4; }
-        if arr[3] != 0 { mask |= 8; }
+        if arr[0] != 0 {
+            mask |= 1;
+        }
+        if arr[1] != 0 {
+            mask |= 2;
+        }
+        if arr[2] != 0 {
+            mask |= 4;
+        }
+        if arr[3] != 0 {
+            mask |= 8;
+        }
         mask
     }
 }
@@ -263,9 +303,7 @@ pub fn parse_price(s: &str) -> PriceCents {
         }
     }
     // Fallback to standard parse
-    s.parse::<f64>()
-        .map(|p| price_to_cents(p))
-        .unwrap_or(0)
+    s.parse::<f64>().map(|p| price_to_cents(p)).unwrap_or(0)
 }
 
 /// Arbitrage opportunity type, determining the execution strategy
@@ -315,7 +353,9 @@ impl FastExecutionRequest {
             // Poly-only: no fees
             ArbType::PolyOnly => 0,
             // Kalshi-only: fees on both sides
-            ArbType::KalshiOnly => kalshi_fee_cents(self.yes_price) + kalshi_fee_cents(self.no_price),
+            ArbType::KalshiOnly => {
+                kalshi_fee_cents(self.yes_price) + kalshi_fee_cents(self.no_price)
+            }
         }
     }
 }
@@ -490,18 +530,25 @@ mod tests {
     fn test_pack_unpack_roundtrip() {
         // Test various values pack and unpack correctly
         let test_cases = vec![
-            (50, 50, 1000, 1000),  // Common mid-price
-            (1, 99, 100, 100),      // Edge prices
-            (99, 1, 65535, 65535),  // Max sizes
-            (0, 0, 0, 0),           // All zeros
-            (NO_PRICE, NO_PRICE, 0, 0),  // No prices
+            (50, 50, 1000, 1000),       // Common mid-price
+            (1, 99, 100, 100),          // Edge prices
+            (99, 1, 65535, 65535),      // Max sizes
+            (0, 0, 0, 0),               // All zeros
+            (NO_PRICE, NO_PRICE, 0, 0), // No prices
         ];
 
         for (yes_ask, no_ask, yes_size, no_size) in test_cases {
             let packed = pack_orderbook(yes_ask, no_ask, yes_size, no_size);
             let (y, n, ys, ns) = unpack_orderbook(packed);
-            assert_eq!((y, n, ys, ns), (yes_ask, no_ask, yes_size, no_size),
-                "Roundtrip failed for ({}, {}, {}, {})", yes_ask, no_ask, yes_size, no_size);
+            assert_eq!(
+                (y, n, ys, ns),
+                (yes_ask, no_ask, yes_size, no_size),
+                "Roundtrip failed for ({}, {}, {}, {})",
+                yes_ask,
+                no_ask,
+                yes_size,
+                no_size
+            );
         }
     }
 
@@ -510,9 +557,21 @@ mod tests {
         // Verify the exact bit layout: [yes_ask:16][no_ask:16][yes_size:16][no_size:16]
         let packed = pack_orderbook(0xABCD, 0x1234, 0x5678, 0x9ABC);
 
-        assert_eq!((packed >> 48) & 0xFFFF, 0xABCD, "yes_ask should be in bits 48-63");
-        assert_eq!((packed >> 32) & 0xFFFF, 0x1234, "no_ask should be in bits 32-47");
-        assert_eq!((packed >> 16) & 0xFFFF, 0x5678, "yes_size should be in bits 16-31");
+        assert_eq!(
+            (packed >> 48) & 0xFFFF,
+            0xABCD,
+            "yes_ask should be in bits 48-63"
+        );
+        assert_eq!(
+            (packed >> 32) & 0xFFFF,
+            0x1234,
+            "no_ask should be in bits 32-47"
+        );
+        assert_eq!(
+            (packed >> 16) & 0xFFFF,
+            0x5678,
+            "yes_size should be in bits 16-31"
+        );
         assert_eq!(packed & 0xFFFF, 0x9ABC, "no_size should be in bits 0-15");
     }
 
@@ -574,18 +633,20 @@ mod tests {
         let book = Arc::new(AtomicOrderbook::new());
         book.store(50, 50, 1000, 1000);
 
-        let handles: Vec<_> = (0..4).map(|i| {
-            let book = book.clone();
-            thread::spawn(move || {
-                for _ in 0..1000 {
-                    if i % 2 == 0 {
-                        book.update_yes(45 + (i as u16), 500);
-                    } else {
-                        book.update_no(55 + (i as u16), 500);
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let book = book.clone();
+                thread::spawn(move || {
+                    for _ in 0..1000 {
+                        if i % 2 == 0 {
+                            book.update_yes(45 + (i as u16), 500);
+                        } else {
+                            book.update_no(55 + (i as u16), 500);
+                        }
                     }
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         for h in handles {
             h.join().unwrap();
@@ -644,7 +705,10 @@ mod tests {
             // Allow 1 cent difference due to rounding differences
             assert!(
                 (int_fee as i16 - float_fee as i16).abs() <= 1,
-                "Fee mismatch at {}¢: int={}, float={}", price_cents, int_fee, float_fee
+                "Fee mismatch at {}¢: int={}, float={}",
+                price_cents,
+                int_fee,
+                float_fee
             );
         }
     }
@@ -659,9 +723,9 @@ mod tests {
         assert_eq!(price_to_cents(0.01), 1);
         assert_eq!(price_to_cents(0.99), 99);
         assert_eq!(price_to_cents(0.0), 0);
-        assert_eq!(price_to_cents(1.0), 99);  // Clamped to 99
-        assert_eq!(price_to_cents(0.505), 51);  // Rounded
-        assert_eq!(price_to_cents(0.504), 50);  // Rounded
+        assert_eq!(price_to_cents(1.0), 99); // Clamped to 99
+        assert_eq!(price_to_cents(0.505), 51); // Rounded
+        assert_eq!(price_to_cents(0.504), 50); // Rounded
     }
 
     #[test]
@@ -716,7 +780,10 @@ mod tests {
         // threshold_cents is in cents, so 100 = $1.00
         let mask = state.check_arbs(100);
 
-        assert!(mask & 1 != 0, "Should detect Poly YES + Kalshi NO arb (bit 0)");
+        assert!(
+            mask & 1 != 0,
+            "Should detect Poly YES + Kalshi NO arb (bit 0)"
+        );
     }
 
     #[test]
@@ -728,7 +795,10 @@ mod tests {
 
         let mask = state.check_arbs(100);
 
-        assert!(mask & 2 != 0, "Should detect Kalshi YES + Poly NO arb (bit 1)");
+        assert!(
+            mask & 2 != 0,
+            "Should detect Kalshi YES + Poly NO arb (bit 1)"
+        );
     }
 
     #[test]
@@ -865,17 +935,22 @@ mod tests {
         assert!(market.pair.is_some());
 
         // Test get_by_kalshi_hash
-        let market = state.get_by_kalshi_hash(fxhash_str(&kalshi_ticker))
+        let market = state
+            .get_by_kalshi_hash(fxhash_str(&kalshi_ticker))
             .expect("Should find by Kalshi hash");
         assert!(market.pair.is_some());
 
         // Test get_by_poly_yes_hash
-        let market = state.get_by_poly_yes_hash(fxhash_str(&poly_yes))
+        let market = state
+            .get_by_poly_yes_hash(fxhash_str(&poly_yes))
             .expect("Should find by Poly YES hash");
         assert!(market.pair.is_some());
 
         // Test id lookups
-        assert_eq!(state.id_by_kalshi_hash(fxhash_str(&kalshi_ticker)), Some(id));
+        assert_eq!(
+            state.id_by_kalshi_hash(fxhash_str(&kalshi_ticker)),
+            Some(id)
+        );
         assert_eq!(state.id_by_poly_yes_hash(fxhash_str(&poly_yes)), Some(id));
     }
 
@@ -996,7 +1071,10 @@ mod tests {
         };
 
         assert_eq!(req.profit_cents(), 12);
-        assert_eq!(req.estimated_fee_cents(), kalshi_fee_cents(40) + kalshi_fee_cents(44));
+        assert_eq!(
+            req.estimated_fee_cents(),
+            kalshi_fee_cents(40) + kalshi_fee_cents(44)
+        );
     }
 
     #[test]
@@ -1063,7 +1141,10 @@ mod tests {
             arb_type: ArbType::KalshiOnly,
             detected_ns: 0,
         };
-        assert_eq!(req4.estimated_fee_cents(), kalshi_fee_cents(40) + kalshi_fee_cents(50));
+        assert_eq!(
+            req4.estimated_fee_cents(),
+            kalshi_fee_cents(40) + kalshi_fee_cents(50)
+        );
     }
 
     // =========================================================================
@@ -1160,24 +1241,30 @@ mod tests {
         market.kalshi.store(50, 50, 1000, 1000);
         market.poly.store(50, 50, 1000, 1000);
 
-        let handles: Vec<_> = (0..4).map(|i| {
-            let state = state.clone();
-            thread::spawn(move || {
-                for j in 0..1000 {
-                    let market = &state.markets[0];
-                    if i % 2 == 0 {
-                        // Simulate Kalshi updates
-                        market.kalshi.update_yes(40 + ((j % 10) as u16), 500 + j as u16);
-                    } else {
-                        // Simulate Poly updates
-                        market.poly.update_no(50 + ((j % 10) as u16), 600 + j as u16);
-                    }
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let state = state.clone();
+                thread::spawn(move || {
+                    for j in 0..1000 {
+                        let market = &state.markets[0];
+                        if i % 2 == 0 {
+                            // Simulate Kalshi updates
+                            market
+                                .kalshi
+                                .update_yes(40 + ((j % 10) as u16), 500 + j as u16);
+                        } else {
+                            // Simulate Poly updates
+                            market
+                                .poly
+                                .update_no(50 + ((j % 10) as u16), 600 + j as u16);
+                        }
 
-                    // Check arbs (should never panic) - threshold = 100 cents
-                    let _ = market.check_arbs(100);
-                }
+                        // Check arbs (should never panic) - threshold = 100 cents
+                        let _ = market.check_arbs(100);
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         for h in handles {
             h.join().unwrap();

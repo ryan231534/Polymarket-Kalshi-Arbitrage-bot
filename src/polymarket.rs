@@ -13,11 +13,10 @@ use tokio::time::{interval, Instant};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
 
-use crate::config::{POLYMARKET_WS_URL, POLY_PING_INTERVAL_SECS, GAMMA_API_BASE};
+use crate::config::{GAMMA_API_BASE, POLYMARKET_WS_URL, POLY_PING_INTERVAL_SECS};
 use crate::execution::NanoClock;
 use crate::types::{
-    GlobalState, FastExecutionRequest, ArbType, PriceCents, SizeCents,
-    parse_price, fxhash_str,
+    fxhash_str, parse_price, ArbType, FastExecutionRequest, GlobalState, PriceCents, SizeCents,
 };
 
 // === WebSocket Message Types ===
@@ -72,7 +71,7 @@ impl GammaClient {
                 .expect("Failed to build HTTP client"),
         }
     }
-    
+
     /// Look up Polymarket market by slug, return (yes_token, no_token)
     /// Tries both the exact date and next day (timezone handling)
     pub async fn lookup_market(&self, slug: &str) -> Result<Option<(String, String)>> {
@@ -80,7 +79,7 @@ impl GammaClient {
         if let Some(tokens) = self.try_lookup_slug(slug).await? {
             return Ok(Some(tokens));
         }
-        
+
         // Try with next day (Polymarket may use local time)
         if let Some(next_day_slug) = increment_date_in_slug(slug) {
             if let Some(tokens) = self.try_lookup_slug(&next_day_slug).await? {
@@ -88,38 +87,39 @@ impl GammaClient {
                 return Ok(Some(tokens));
             }
         }
-        
+
         Ok(None)
     }
-    
+
     async fn try_lookup_slug(&self, slug: &str) -> Result<Option<(String, String)>> {
         let url = format!("{}/markets?slug={}", GAMMA_API_BASE, slug);
-        
+
         let resp = self.http.get(&url).send().await?;
-        
+
         if !resp.status().is_success() {
             return Ok(None);
         }
-        
+
         let markets: Vec<GammaMarket> = resp.json().await?;
-        
+
         if markets.is_empty() {
             return Ok(None);
         }
-        
+
         let market = &markets[0];
-        
+
         // Check if active and not closed
         if market.closed == Some(true) || market.active == Some(false) {
             return Ok(None);
         }
-        
+
         // Parse clobTokenIds JSON array
-        let token_ids: Vec<String> = market.clob_token_ids
+        let token_ids: Vec<String> = market
+            .clob_token_ids
             .as_ref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
-        
+
         if token_ids.len() >= 2 {
             Ok(Some((token_ids[0].clone(), token_ids[1].clone())))
         } else {
@@ -143,30 +143,47 @@ fn increment_date_in_slug(slug: &str) -> Option<String> {
     if parts.len() < 6 {
         return None;
     }
-    
+
     let year: i32 = parts[3].parse().ok()?;
     let month: u32 = parts[4].parse().ok()?;
     let day: u32 = parts[5].parse().ok()?;
-    
+
     // Compute next day
     let days_in_month = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 29 } else { 28 },
+        2 => {
+            if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 31,
     };
-    
+
     let (new_year, new_month, new_day) = if day >= days_in_month {
-        if month == 12 { (year + 1, 1, 1) } else { (year, month + 1, 1) }
+        if month == 12 {
+            (year + 1, 1, 1)
+        } else {
+            (year, month + 1, 1)
+        }
     } else {
         (year, month, day + 1)
     };
-    
+
     // Rebuild slug with owned strings
     let prefix = parts[..3].join("-");
-    let suffix = if parts.len() > 6 { format!("-{}", parts[6..].join("-")) } else { String::new() };
+    let suffix = if parts.len() > 6 {
+        format!("-{}", parts[6..].join("-"))
+    } else {
+        String::new()
+    };
 
-    Some(format!("{}-{}-{:02}-{:02}{}", prefix, new_year, new_month, new_day, suffix))
+    Some(format!(
+        "{}-{}-{:02}-{:02}{}",
+        prefix, new_year, new_month, new_day, suffix
+    ))
 }
 
 // =============================================================================
@@ -188,7 +205,9 @@ pub async fn run_ws(
     exec_tx: mpsc::Sender<FastExecutionRequest>,
     threshold_cents: PriceCents,
 ) -> Result<()> {
-    let tokens: Vec<String> = state.markets.iter()
+    let tokens: Vec<String> = state
+        .markets
+        .iter()
         .take(state.market_count())
         .filter_map(|m| m.pair.as_ref())
         .flat_map(|p| [p.poly_yes_token.to_string(), p.poly_no_token.to_string()])
@@ -214,7 +233,9 @@ pub async fn run_ws(
         sub_type: "market",
     };
 
-    write.send(Message::Text(serde_json::to_string(&subscribe_msg)?)).await?;
+    write
+        .send(Message::Text(serde_json::to_string(&subscribe_msg)?))
+        .await?;
     info!("[POLY] Subscribed to {} tokens", tokens.len());
 
     let clock = NanoClock::new();
@@ -301,11 +322,17 @@ async fn process_book(
     let token_hash = fxhash_str(&book.asset_id);
 
     // Find best ask (lowest price)
-    let (best_ask, ask_size) = book.asks.iter()
+    let (best_ask, ask_size) = book
+        .asks
+        .iter()
         .filter_map(|l| {
             let price = parse_price(&l.price);
             let size = parse_size(&l.size);
-            if price > 0 { Some((price, size)) } else { None }
+            if price > 0 {
+                Some((price, size))
+            } else {
+                None
+            }
         })
         .min_by_key(|(p, _)| *p)
         .unwrap_or((0, 0));
@@ -348,9 +375,13 @@ async fn process_price_change(
         return;
     }
 
-    let Some(price_str) = &change.price else { return };
+    let Some(price_str) = &change.price else {
+        return;
+    };
     let price = parse_price(price_str);
-    if price == 0 { return; }
+    if price == 0 {
+        return;
+    }
 
     let token_hash = fxhash_str(&change.asset_id);
 
@@ -426,6 +457,6 @@ async fn send_arb_request(
         detected_ns: clock.now_ns(),
     };
 
-    // send! ~~ 
+    // send! ~~
     let _ = exec_tx.try_send(req);
 }

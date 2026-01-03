@@ -1,0 +1,11 @@
+{
+  "ts_ms": 1767392760122,
+  "total_realized_pnl_cents": 0,
+  "total_unrealized_pnl_cents": 0,
+  "total_fees_paid_cents": 0,
+  "total_net_pnl_cents": 0,
+  "by_venue": [],
+  "by_market": [],
+  "positions": {},
+  "last_event_ts_ms": 0
+}

@@ -15,8 +15,18 @@ pub const POLYMARKET_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/
 /// Gamma API base URL (Polymarket market data)
 pub const GAMMA_API_BASE: &str = "https://gamma-api.polymarket.com";
 
+/// DEPRECATED: Use profit_threshold_cents() instead
 /// Arb threshold: alert when total cost < this (e.g., 0.995 = 0.5% profit)
+///
+/// This constant is kept for backward compatibility with existing code/configs.
+/// New code should use `profit_threshold_cents()` for consistent threshold handling.
+#[deprecated(note = "Use profit_threshold_cents() for consistent threshold handling")]
+#[allow(dead_code)]
 pub const ARB_THRESHOLD: f64 = 0.995;
+
+/// Default profit threshold in cents (100 cents = $1.00 = break-even)
+/// Set lower values for more aggressive arbitrage (e.g., 99 = 1% profit minimum)
+const DEFAULT_PROFIT_THRESHOLD_CENTS: u16 = 100;
 
 /// Polymarket ping interval (seconds) - keep connection alive
 pub const POLY_PING_INTERVAL_SECS: u64 = 30;
@@ -40,6 +50,111 @@ pub fn price_logging_enabled() -> bool {
             .map(|v| v == "1" || v.to_lowercase() == "true")
             .unwrap_or(false)
     })
+}
+
+/// Get enabled leagues from LEAGUES env var (comma-separated).
+/// If unset/empty, returns empty Vec meaning "all leagues" (same as ENABLED_LEAGUES = &[]).
+/// Example: LEAGUES="nfl,nba,epl"
+pub fn enabled_leagues_from_env() -> Vec<String> {
+    std::env::var("LEAGUES")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.split(',').map(|l| l.trim().to_string()).collect())
+        .unwrap_or_default()
+}
+
+/// Get the canonical profit threshold in cents.
+///
+/// This is the SINGLE SOURCE OF TRUTH for the profit threshold used throughout
+/// the system for:
+/// - Arbitrage opportunity detection (check_arbs)
+/// - Execution decisions (process)
+/// - Logging (startup, heartbeat)
+///
+/// The threshold represents the maximum total cost (in cents) for an arbitrage
+/// to be considered profitable:
+/// - 100 cents = break-even (buy YES + NO for exactly $1.00)
+/// - 99 cents = 1% minimum profit (buy YES + NO for $0.99)
+/// - 95 cents = 5% minimum profit (buy YES + NO for $0.95)
+///
+/// Configuration:
+/// - Reads from PROFIT_THRESHOLD_CENTS env var (integer cents: 1-100)
+/// - Falls back to ARB_THRESHOLD env var if set (legacy float: 0.01-1.00)
+/// - Uses DEFAULT_PROFIT_THRESHOLD_CENTS (100) if neither is set
+///
+/// The value is cached after first call for performance and consistency.
+///
+/// # Examples
+/// ```
+/// // Get threshold (default 100 cents)
+/// let threshold = profit_threshold_cents();
+///
+/// // With env var:
+/// // PROFIT_THRESHOLD_CENTS=99 → 99 cents (1% profit)
+/// // PROFIT_THRESHOLD_CENTS=95 → 95 cents (5% profit)
+/// ```
+pub fn profit_threshold_cents() -> u16 {
+    use std::sync::OnceLock;
+    use tracing::warn;
+
+    static CACHED: OnceLock<u16> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        // Try PROFIT_THRESHOLD_CENTS first (preferred, integer cents)
+        if let Ok(val_str) = std::env::var("PROFIT_THRESHOLD_CENTS") {
+            if let Ok(cents) = val_str.parse::<u16>() {
+                if cents > 0 && cents <= 100 {
+                    return cents;
+                } else {
+                    warn!(
+                        "Invalid PROFIT_THRESHOLD_CENTS={} (must be 1-100), using default {}",
+                        cents, DEFAULT_PROFIT_THRESHOLD_CENTS
+                    );
+                }
+            } else {
+                warn!(
+                    "Failed to parse PROFIT_THRESHOLD_CENTS='{}', using default {}",
+                    val_str, DEFAULT_PROFIT_THRESHOLD_CENTS
+                );
+            }
+        }
+
+        // Fallback to legacy ARB_THRESHOLD if set (float 0.01-1.00)
+        #[allow(deprecated)]
+        if let Ok(val_str) = std::env::var("ARB_THRESHOLD") {
+            if let Ok(threshold_f64) = val_str.parse::<f64>() {
+                if threshold_f64 > 0.0 && threshold_f64 <= 1.0 {
+                    let cents = (threshold_f64 * 100.0).round() as u16;
+                    if cents > 0 && cents <= 100 {
+                        return cents;
+                    }
+                }
+                warn!(
+                    "Invalid ARB_THRESHOLD={} (must be 0.01-1.00), using default {}",
+                    threshold_f64, DEFAULT_PROFIT_THRESHOLD_CENTS
+                );
+            }
+        }
+
+        // Default value
+        DEFAULT_PROFIT_THRESHOLD_CENTS
+    })
+}
+
+/// Format the threshold for display in logs.
+///
+/// Returns a string like "100¢" or "99¢" for consistent logging.
+pub fn format_threshold_cents(cents: u16) -> String {
+    format!("{}¢", cents)
+}
+
+/// Calculate the profit percentage from a threshold in cents.
+///
+/// # Examples
+/// - 100 cents → 0.0% profit (break-even)
+/// - 99 cents → 1.0% profit
+/// - 95 cents → 5.0% profit
+pub fn threshold_profit_percent(cents: u16) -> f64 {
+    ((100 - cents) as f64 / 100.0) * 100.0
 }
 
 /// League configuration for market discovery
@@ -179,4 +294,41 @@ pub fn get_league_config(league: &str) -> Option<LeagueConfig> {
     get_league_configs()
         .into_iter()
         .find(|c| c.league_code == league || c.poly_prefix == league)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_threshold_cents() {
+        assert_eq!(format_threshold_cents(100), "100¢");
+        assert_eq!(format_threshold_cents(99), "99¢");
+        assert_eq!(format_threshold_cents(95), "95¢");
+        assert_eq!(format_threshold_cents(1), "1¢");
+    }
+
+    #[test]
+    fn test_threshold_profit_percent() {
+        // 100 cents = break-even = 0% profit
+        assert!((threshold_profit_percent(100) - 0.0).abs() < 0.01);
+
+        // 99 cents = 1% profit
+        assert!((threshold_profit_percent(99) - 1.0).abs() < 0.01);
+
+        // 95 cents = 5% profit
+        assert!((threshold_profit_percent(95) - 5.0).abs() < 0.01);
+
+        // 90 cents = 10% profit
+        assert!((threshold_profit_percent(90) - 10.0).abs() < 0.01);
+
+        // 50 cents = 50% profit
+        assert!((threshold_profit_percent(50) - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_profit_threshold_cents_default() {
+        // This test cannot reliably set env vars due to caching,
+        // but we can verify the default constant
+        assert_eq!(DEFAULT_PROFIT_THRESHOLD_CENTS, 100);
+    }
 }

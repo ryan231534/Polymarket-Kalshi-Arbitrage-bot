@@ -18,21 +18,24 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::{http::Request, Message}};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{http::Request, Message},
+};
 use tracing::{debug, error, info};
 
-use crate::config::{KALSHI_WS_URL, KALSHI_API_BASE, KALSHI_API_DELAY_MS};
+use crate::config::{KALSHI_API_BASE, KALSHI_API_DELAY_MS, KALSHI_WS_URL};
 use crate::execution::NanoClock;
 use crate::types::{
-    KalshiEventsResponse, KalshiMarketsResponse, KalshiEvent, KalshiMarket,
-    GlobalState, FastExecutionRequest, ArbType, PriceCents, SizeCents, fxhash_str,
+    fxhash_str, ArbType, FastExecutionRequest, GlobalState, KalshiEvent, KalshiEventsResponse,
+    KalshiMarket, KalshiMarketsResponse, PriceCents, SizeCents,
 };
 
 // === Order Types ===
 
+use arrayvec::ArrayString;
 use std::borrow::Cow;
 use std::fmt::Write;
-use arrayvec::ArrayString;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct KalshiOrderRequest<'a> {
@@ -55,7 +58,13 @@ pub struct KalshiOrderRequest<'a> {
 
 impl<'a> KalshiOrderRequest<'a> {
     /// Create an IOC (immediate-or-cancel) buy order
-    pub fn ioc_buy(ticker: Cow<'a, str>, side: &'static str, price_cents: i64, count: i64, client_order_id: Cow<'a, str>) -> Self {
+    pub fn ioc_buy(
+        ticker: Cow<'a, str>,
+        side: &'static str,
+        price_cents: i64,
+        count: i64,
+        client_order_id: Cow<'a, str>,
+    ) -> Self {
         let (yes_price, no_price) = if side == "yes" {
             (Some(price_cents), None)
         } else {
@@ -77,7 +86,13 @@ impl<'a> KalshiOrderRequest<'a> {
     }
 
     /// Create an IOC (immediate-or-cancel) sell order
-    pub fn ioc_sell(ticker: Cow<'a, str>, side: &'static str, price_cents: i64, count: i64, client_order_id: Cow<'a, str>) -> Self {
+    pub fn ioc_sell(
+        ticker: Cow<'a, str>,
+        side: &'static str,
+        price_cents: i64,
+        count: i64,
+        client_order_id: Cow<'a, str>,
+    ) -> Self {
         let (yes_price, no_price) = if side == "yes" {
             (Some(price_cents), None)
         } else {
@@ -109,7 +124,7 @@ pub struct KalshiOrderResponse {
 pub struct KalshiOrderDetails {
     pub order_id: String,
     pub ticker: String,
-    pub status: String,        // "resting", "canceled", "executed", "pending"
+    pub status: String, // "resting", "canceled", "executed", "pending"
     #[serde(default)]
     pub remaining_count: Option<i64>,
     #[serde(default)]
@@ -172,7 +187,10 @@ impl KalshiConfig {
             .to_owned();
         let private_key = RsaPrivateKey::from_pkcs1_pem(&private_key_pem)
             .context("Failed to parse private key PEM")?;
-        Ok(Self { api_key_id, private_key })
+        Ok(Self {
+            api_key_id,
+            private_key,
+        })
     }
 
     pub fn sign(&self, message: &str) -> Result<String> {
@@ -180,7 +198,10 @@ impl KalshiConfig {
         let signing_key = SigningKey::<Sha256>::new(self.private_key.clone());
         let signature = signing_key.sign_with_rng(&mut rand::thread_rng(), message.as_bytes());
         let sig_b64 = BASE64.encode(signature.to_bytes());
-        tracing::debug!("[KALSHI-DEBUG] Signature (first 50 chars): {}...", &sig_b64[..50.min(sig_b64.len())]);
+        tracing::debug!(
+            "[KALSHI-DEBUG] Signature (first 50 chars): {}...",
+            &sig_b64[..50.min(sig_b64.len())]
+        );
         Ok(sig_b64)
     }
 }
@@ -214,12 +235,15 @@ impl KalshiApiClient {
     #[inline]
     fn next_order_id() -> ArrayString<24> {
         let counter = ORDER_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let mut buf = ArrayString::<24>::new();
         let _ = write!(&mut buf, "a{}{}", ts, counter);
         buf
     }
-    
+
     /// Generic authenticated GET request with retry on rate limit
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let mut retries = 0;
@@ -233,18 +257,21 @@ impl KalshiApiClient {
                 .as_millis() as u64;
             // Kalshi signature uses FULL path including /trade-api/v2 prefix
             let full_path = format!("/trade-api/v2{}", path);
-            let signature = self.config.sign(&format!("{}GET{}", timestamp_ms, full_path))?;
-            
-            let resp = self.http
+            let signature = self
+                .config
+                .sign(&format!("{}GET{}", timestamp_ms, full_path))?;
+
+            let resp = self
+                .http
                 .get(&url)
                 .header("KALSHI-ACCESS-KEY", &self.config.api_key_id)
                 .header("KALSHI-ACCESS-SIGNATURE", &signature)
                 .header("KALSHI-ACCESS-TIMESTAMP", timestamp_ms.to_string())
                 .send()
                 .await?;
-            
+
             let status = resp.status();
-            
+
             // Handle rate limit with exponential backoff
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 retries += 1;
@@ -252,37 +279,46 @@ impl KalshiApiClient {
                     anyhow::bail!("Kalshi API rate limited after {} retries", MAX_RETRIES);
                 }
                 let backoff_ms = 2000 * (1 << retries); // 4s, 8s, 16s, 32s, 64s
-                debug!("[KALSHI] Rate limited, backing off {}ms (retry {}/{})", 
-                       backoff_ms, retries, MAX_RETRIES);
+                debug!(
+                    "[KALSHI] Rate limited, backing off {}ms (retry {}/{})",
+                    backoff_ms, retries, MAX_RETRIES
+                );
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 continue;
             }
-            
+
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 anyhow::bail!("Kalshi API error {}: {}", status, body);
             }
-            
+
             let data: T = resp.json().await?;
             tokio::time::sleep(Duration::from_millis(KALSHI_API_DELAY_MS)).await;
             return Ok(data);
         }
     }
-    
+
     pub async fn get_events(&self, series_ticker: &str, limit: u32) -> Result<Vec<KalshiEvent>> {
-        let path = format!("/events?series_ticker={}&limit={}&status=open", series_ticker, limit);
+        let path = format!(
+            "/events?series_ticker={}&limit={}&status=open",
+            series_ticker, limit
+        );
         let resp: KalshiEventsResponse = self.get(&path).await?;
         Ok(resp.events)
     }
-    
+
     pub async fn get_markets(&self, event_ticker: &str) -> Result<Vec<KalshiMarket>> {
         let path = format!("/markets?event_ticker={}", event_ticker);
         let resp: KalshiMarketsResponse = self.get(&path).await?;
         Ok(resp.markets)
     }
-    
+
     /// Generic authenticated POST request
-    async fn post<T: serde::de::DeserializeOwned, B: Serialize>(&self, path: &str, body: &B) -> Result<T> {
+    async fn post<T: serde::de::DeserializeOwned, B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
         let url = format!("{}{}", KALSHI_API_BASE, path);
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -293,7 +329,8 @@ impl KalshiApiClient {
         let msg = format!("{}POST{}", timestamp_ms, full_path);
         let signature = self.config.sign(&msg)?;
 
-        let resp = self.http
+        let resp = self
+            .http
             .post(&url)
             .header("KALSHI-ACCESS-KEY", &self.config.api_key_id)
             .header("KALSHI-ACCESS-SIGNATURE", &signature)
@@ -309,22 +346,25 @@ impl KalshiApiClient {
             let body = resp.text().await.unwrap_or_default();
             anyhow::bail!("Kalshi API error {}: {}", status, body);
         }
-        
+
         let data: T = resp.json().await?;
         Ok(data)
     }
-    
+
     /// Create an order on Kalshi
-    pub async fn create_order(&self, order: &KalshiOrderRequest<'_>) -> Result<KalshiOrderResponse> {
+    pub async fn create_order(
+        &self,
+        order: &KalshiOrderRequest<'_>,
+    ) -> Result<KalshiOrderResponse> {
         let path = "/portfolio/orders";
         self.post(path, order).await
     }
-    
+
     /// Create an IOC buy order (convenience method)
     pub async fn buy_ioc(
         &self,
         ticker: &str,
-        side: &str,  // "yes" or "no"
+        side: &str, // "yes" or "no"
         price_cents: i64,
         count: i64,
     ) -> Result<KalshiOrderResponse> {
@@ -339,12 +379,19 @@ impl KalshiApiClient {
             side_static,
             price_cents,
             count,
-            Cow::Borrowed(&order_id)
+            Cow::Borrowed(&order_id),
         );
-        debug!("[KALSHI] IOC {} {} @{}¢ x{}", side, ticker, price_cents, count);
+        debug!(
+            "[KALSHI] IOC {} {} @{}¢ x{}",
+            side, ticker, price_cents, count
+        );
 
         let resp = self.create_order(&order).await?;
-        debug!("[KALSHI] {} filled={}", resp.order.status, resp.order.filled_count());
+        debug!(
+            "[KALSHI] {} filled={}",
+            resp.order.status,
+            resp.order.filled_count()
+        );
         Ok(resp)
     }
 
@@ -366,12 +413,19 @@ impl KalshiApiClient {
             side_static,
             price_cents,
             count,
-            Cow::Borrowed(&order_id)
+            Cow::Borrowed(&order_id),
         );
-        debug!("[KALSHI] SELL {} {} @{}¢ x{}", side, ticker, price_cents, count);
+        debug!(
+            "[KALSHI] SELL {} {} @{}¢ x{}",
+            side, ticker, price_cents, count
+        );
 
         let resp = self.create_order(&order).await?;
-        debug!("[KALSHI] {} filled={}", resp.order.status, resp.order.filled_count());
+        debug!(
+            "[KALSHI] {} filled={}",
+            resp.order.status,
+            resp.order.filled_count()
+        );
         Ok(resp)
     }
 }
@@ -422,7 +476,9 @@ pub async fn run_ws(
     exec_tx: mpsc::Sender<FastExecutionRequest>,
     threshold_cents: PriceCents,
 ) -> Result<()> {
-    let tickers: Vec<String> = state.markets.iter()
+    let tickers: Vec<String> = state
+        .markets
+        .iter()
         .take(state.market_count())
         .filter_map(|m| m.pair.as_ref().map(|p| p.kalshi_market_ticker.to_string()))
         .collect();
@@ -449,10 +505,15 @@ pub async fn run_ws(
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
         .header("Sec-WebSocket-Version", "13")
-        .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
         .body(())?;
 
-    let (ws_stream, _) = connect_async(request).await.context("Failed to connect to Kalshi")?;
+    let (ws_stream, _) = connect_async(request)
+        .await
+        .context("Failed to connect to Kalshi")?;
     info!("[KALSHI] Connected");
 
     let (mut write, mut read) = ws_stream.split();
@@ -467,7 +528,9 @@ pub async fn run_ws(
         },
     };
 
-    write.send(Message::Text(serde_json::to_string(&subscribe_msg)?)).await?;
+    write
+        .send(Message::Text(serde_json::to_string(&subscribe_msg)?))
+        .await?;
     info!("[KALSHI] Subscribed to {} markets", tickers.len());
 
     let clock = NanoClock::new();
@@ -477,13 +540,17 @@ pub async fn run_ws(
             Ok(Message::Text(text)) => {
                 match serde_json::from_str::<KalshiWsMessage>(&text) {
                     Ok(kalshi_msg) => {
-                        let ticker = kalshi_msg.msg.as_ref()
+                        let ticker = kalshi_msg
+                            .msg
+                            .as_ref()
                             .and_then(|m| m.market_ticker.as_ref());
 
                         let Some(ticker) = ticker else { continue };
                         let ticker_hash = fxhash_str(ticker);
 
-                        let Some(&market_id) = state.kalshi_to_id.get(&ticker_hash) else { continue };
+                        let Some(&market_id) = state.kalshi_to_id.get(&ticker_hash) else {
+                            continue;
+                        };
                         let market = &state.markets[market_id as usize];
 
                         match kalshi_msg.msg_type.as_str() {
@@ -494,7 +561,10 @@ pub async fn run_ws(
                                     // Check for arbs
                                     let arb_mask = market.check_arbs(threshold_cents);
                                     if arb_mask != 0 {
-                                        send_kalshi_arb_request(market_id, market, arb_mask, &exec_tx, &clock).await;
+                                        send_kalshi_arb_request(
+                                            market_id, market, arb_mask, &exec_tx, &clock,
+                                        )
+                                        .await;
                                     }
                                 }
                             }
@@ -504,7 +574,10 @@ pub async fn run_ws(
 
                                     let arb_mask = market.check_arbs(threshold_cents);
                                     if arb_mask != 0 {
-                                        send_kalshi_arb_request(market_id, market, arb_mask, &exec_tx, &clock).await;
+                                        send_kalshi_arb_request(
+                                            market_id, market, arb_mask, &exec_tx, &clock,
+                                        )
+                                        .await;
                                     }
                                 }
                             }
@@ -513,7 +586,11 @@ pub async fn run_ws(
                     }
                     Err(e) => {
                         // Log at trace level - unknown message types are normal
-                        tracing::trace!("[KALSHI] WS parse error: {} (msg: {}...)", e, &text[..text.len().min(100)]);
+                        tracing::trace!(
+                            "[KALSHI] WS parse error: {} (msg: {}...)",
+                            e,
+                            &text[..text.len().min(100)]
+                        );
                     }
                 }
             }
@@ -536,19 +613,23 @@ pub async fn run_ws(
 #[inline]
 fn process_kalshi_snapshot(market: &crate::types::AtomicMarketState, body: &KalshiWsMsgBody) {
     // Find best YES bid (highest price) - this determines NO ask
-    let (no_ask, no_size) = body.yes.as_ref()
+    let (no_ask, no_size) = body
+        .yes
+        .as_ref()
         .and_then(|levels| {
-            levels.iter()
+            levels
+                .iter()
                 .filter_map(|l| {
-                    if l.len() >= 2 && l[1] > 0 {  // Has quantity
-                        Some((l[0], l[1]))  // (price, qty)
+                    if l.len() >= 2 && l[1] > 0 {
+                        // Has quantity
+                        Some((l[0], l[1])) // (price, qty)
                     } else {
                         None
                     }
                 })
-                .max_by_key(|(p, _)| *p)  // Highest bid
+                .max_by_key(|(p, _)| *p) // Highest bid
                 .map(|(price, qty)| {
-                    let ask = (100 - price) as PriceCents;  // To buy NO, pay 100 - YES_bid
+                    let ask = (100 - price) as PriceCents; // To buy NO, pay 100 - YES_bid
                     let size = (qty * price / 100) as SizeCents;
                     (ask, size)
                 })
@@ -556,9 +637,12 @@ fn process_kalshi_snapshot(market: &crate::types::AtomicMarketState, body: &Kals
         .unwrap_or((0, 0));
 
     // Find best NO bid (highest price) - this determines YES ask
-    let (yes_ask, yes_size) = body.no.as_ref()
+    let (yes_ask, yes_size) = body
+        .no
+        .as_ref()
         .and_then(|levels| {
-            levels.iter()
+            levels
+                .iter()
                 .filter_map(|l| {
                     if l.len() >= 2 && l[1] > 0 {
                         Some((l[0], l[1]))
@@ -568,7 +652,7 @@ fn process_kalshi_snapshot(market: &crate::types::AtomicMarketState, body: &Kals
                 })
                 .max_by_key(|(p, _)| *p)
                 .map(|(price, qty)| {
-                    let ask = (100 - price) as PriceCents;  // To buy YES, pay 100 - NO_bid
+                    let ask = (100 - price) as PriceCents; // To buy YES, pay 100 - NO_bid
                     let size = (qty * price / 100) as SizeCents;
                     (ask, size)
                 })
@@ -590,7 +674,8 @@ fn process_kalshi_delta(market: &crate::types::AtomicMarketState, body: &KalshiW
     // Process YES bid updates (affects NO ask)
     let (no_ask, no_size) = if let Some(levels) = &body.yes {
         // Find best (highest) YES bid with non-zero quantity
-        levels.iter()
+        levels
+            .iter()
             .filter_map(|l| {
                 if l.len() >= 2 && l[1] > 0 {
                     Some((l[0], l[1]))
@@ -611,7 +696,8 @@ fn process_kalshi_delta(market: &crate::types::AtomicMarketState, body: &KalshiW
 
     // Process NO bid updates (affects YES ask)
     let (yes_ask, yes_size) = if let Some(levels) = &body.no {
-        levels.iter()
+        levels
+            .iter()
             .filter_map(|l| {
                 if l.len() >= 2 && l[1] > 0 {
                     Some((l[0], l[1]))
