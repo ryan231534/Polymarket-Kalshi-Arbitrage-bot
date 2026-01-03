@@ -6,3 +6,8 @@ claude.md
 .DS_Store
 positions.json
 .discovery_cache.json
+
+# Runtime logs and data
+logs/
+data/pnl_snapshot.json
+data/pnl_events.jsonl
