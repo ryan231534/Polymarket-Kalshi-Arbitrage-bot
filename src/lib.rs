@@ -14,6 +14,7 @@ mod execution_tests;
 pub mod fees;
 pub mod kalshi;
 pub mod logging;
+pub mod metrics;
 pub mod mismatch;
 pub mod pnl;
 pub mod polymarket;

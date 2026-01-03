@@ -31,6 +31,7 @@ mod execution;
 mod fees;
 mod kalshi;
 mod logging;
+mod metrics;
 mod mismatch;
 mod pnl;
 mod polymarket;
@@ -56,6 +57,7 @@ use discovery::DiscoveryClient;
 use execution::{create_execution_channel, run_execution_loop, ExecutionEngine};
 use fees::{Exchange, FeeModel};
 use kalshi::{KalshiApiClient, KalshiConfig};
+use metrics::Metrics;
 use pnl::PnLTracker;
 use polymarket_clob::{PolymarketAsyncClient, PreparedCreds, SharedAsyncClient};
 use position_tracker::{create_position_channel, position_writer_loop, PositionTracker};
@@ -72,6 +74,10 @@ async fn main() -> Result<()> {
     // Keep guard alive for program lifetime to ensure non-blocking writer flushes
     let _log_guard = logging::init_logging();
     let run_id = logging::get_run_id();
+
+    // Initialize metrics
+    let metrics = Arc::new(Metrics::new());
+    info!("📊 Metrics system initialized");
 
     // Get canonical threshold (single source of truth)
     let threshold_cents = profit_threshold_cents();
@@ -178,6 +184,7 @@ async fn main() -> Result<()> {
         }
     );
 
+    metrics.discovery_runs.inc();
     let discovery =
         DiscoveryClient::new(KalshiApiClient::new(KalshiConfig::from_env()?), team_cache);
 
@@ -187,6 +194,11 @@ async fn main() -> Result<()> {
     } else {
         discovery.discover_all(&leagues_refs).await
     };
+
+    metrics.markets_discovered.set(result.pairs.len() as i64);
+    if !result.errors.is_empty() {
+        metrics.discovery_errors.add(result.errors.len() as u64);
+    }
 
     info!("📊 Market discovery complete:");
     info!("   - Matched market pairs: {}", result.pairs.len());
@@ -266,6 +278,7 @@ async fn main() -> Result<()> {
         position_channel,
         pnl_tracker.clone(),
         fee_model.clone(),
+        metrics.clone(),
         dry_run,
     ));
 
@@ -501,6 +514,7 @@ async fn main() -> Result<()> {
     let heartbeat_state = state.clone();
     let heartbeat_threshold = threshold_cents;
     let heartbeat_pnl = pnl_tracker.clone();
+    let heartbeat_metrics = metrics.clone();
     let heartbeat_flush_secs = pnl_flush_secs;
     let heartbeat_fee_model = fee_model.clone();
     let heartbeat_handle = tokio::spawn(async move {
@@ -587,8 +601,22 @@ async fn main() -> Result<()> {
                 let venue_summary = pnl.format_venue_summary();
                 info!("📊 P&L | {} | {}", pnl_summary, venue_summary);
 
-                // Capture lightweight summary for structured event
+                // Capture lightweight summary for structured event and metrics
                 pnl_summary_data = pnl.summary();
+
+                // Update metrics
+                heartbeat_metrics
+                    .realized_pnl_cents
+                    .set(pnl_summary_data.realized_cents as i64);
+                heartbeat_metrics
+                    .unrealized_pnl_cents
+                    .set(pnl_summary_data.unrealized_cents as i64);
+                heartbeat_metrics
+                    .total_fees_cents
+                    .set(pnl_summary_data.fees_cents as i64);
+                heartbeat_metrics
+                    .active_positions
+                    .set(pnl_summary_data.open_positions as i64);
 
                 // Save snapshot if needed
                 if pnl.should_save_snapshot(heartbeat_flush_secs) {
@@ -599,6 +627,11 @@ async fn main() -> Result<()> {
                         info!("💾 P&L snapshot saved");
                     }
                 }
+            }
+
+            // Print metrics summary every 10 minutes
+            if heartbeat_metrics.opportunities_detected.get() > 0 {
+                heartbeat_metrics.print_summary();
             }
 
             // Emit structured heartbeat event for monitoring/alerting

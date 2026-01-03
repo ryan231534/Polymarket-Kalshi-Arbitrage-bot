@@ -15,6 +15,7 @@ use crate::config::{execution_threshold_cents, min_profit_cents};
 use crate::cost::{analyze_all_in, AllInCfg};
 use crate::fees::{Exchange, FeeModel};
 use crate::kalshi::KalshiApiClient;
+use crate::metrics::Metrics;
 use crate::mismatch::handle_mismatch;
 use crate::pnl::{ContractSide, PnLTracker, Side as PnLSide, Venue};
 use crate::polymarket_clob::SharedAsyncClient;
@@ -59,6 +60,7 @@ pub struct ExecutionEngine {
     position_channel: PositionChannel,
     pnl_tracker: Arc<Mutex<PnLTracker>>,
     fee_model: Arc<FeeModel>,
+    metrics: Arc<Metrics>,
     in_flight: Arc<[AtomicU64; 8]>,
     clock: NanoClock,
     pub dry_run: bool,
@@ -74,6 +76,7 @@ impl ExecutionEngine {
         position_channel: PositionChannel,
         pnl_tracker: Arc<Mutex<PnLTracker>>,
         fee_model: Arc<FeeModel>,
+        metrics: Arc<Metrics>,
         dry_run: bool,
     ) -> Self {
         let test_mode = std::env::var("TEST_ARB")
@@ -88,6 +91,7 @@ impl ExecutionEngine {
             position_channel,
             pnl_tracker,
             fee_model,
+            metrics,
             in_flight: Arc::new(std::array::from_fn(|_| AtomicU64::new(0))),
             clock: NanoClock::new(),
             dry_run,
@@ -896,10 +900,18 @@ pub async fn run_execution_loop(
     while let Some(req) = rx.recv().await {
         let engine = engine.clone();
 
+        // Track opportunity detected
+        engine.metrics.opportunities_detected.inc();
+
         // Process immediately in spawned task
         tokio::spawn(async move {
+            engine.metrics.execution_attempts.inc();
+
             match engine.process(req).await {
                 Ok(result) if result.success => {
+                    engine.metrics.execution_successes.inc();
+                    engine.metrics.opportunities_executed.inc();
+
                     info!(
                         "[EXEC] ✅ market_id={} profit={}¢ latency={}µs",
                         result.market_id,
@@ -908,6 +920,8 @@ pub async fn run_execution_loop(
                     );
                 }
                 Ok(result) => {
+                    engine.metrics.execution_failures.inc();
+
                     if result.error != Some("Already in-flight") {
                         warn!(
                             "[EXEC] ⚠️ market_id={}: {:?}",
@@ -916,6 +930,7 @@ pub async fn run_execution_loop(
                     }
                 }
                 Err(e) => {
+                    engine.metrics.execution_failures.inc();
                     error!("[EXEC] ❌ Error: {}", e);
                 }
             }
