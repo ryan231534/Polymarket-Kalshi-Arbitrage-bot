@@ -60,6 +60,7 @@ pub enum Dir {
     /// Long exposure: need to SELL to flatten
     Long,
     /// Short exposure: need to BUY to cover
+    #[allow(dead_code)]
     Short,
 }
 
@@ -95,16 +96,19 @@ pub enum MismatchSeverity {
 #[derive(Debug, Clone)]
 pub struct UnwindResult {
     /// Initial quantity to unwind
+    #[allow(dead_code)]
     pub initial_qty: u32,
     /// Quantity successfully filled
     pub filled_qty: u32,
     /// Quantity remaining after unwind
     pub remaining_qty: u32,
     /// Number of ladder steps attempted
+    #[allow(dead_code)]
     pub steps_attempted: u32,
     /// Worst (most aggressive) price used
     pub worst_price_used: u16,
     /// Estimated total cost in cents (negative = proceeds from selling)
+    #[allow(dead_code)]
     pub total_cost_cents: i64,
     /// Elapsed time in milliseconds
     pub elapsed_ms: u64,

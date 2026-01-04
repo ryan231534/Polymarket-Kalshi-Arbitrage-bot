@@ -37,17 +37,23 @@ pub struct PrefetchResult {
     /// All Kalshi markets fetched (keyed by event_ticker)
     pub kalshi_markets: HashMap<String, Vec<KalshiMarket>>,
     /// Polymarket token mappings (slug -> (yes_token, no_token))
+    #[allow(dead_code)]
     pub poly_tokens: HashMap<String, (String, String)>,
     /// Timing statistics
+    #[allow(dead_code)]
     pub timing_ms: PrefetchTiming,
 }
 
 /// Timing statistics for prefetch operations
 #[derive(Debug, Clone, Default)]
 pub struct PrefetchTiming {
+    #[allow(dead_code)]
     pub total_ms: u64,
+    #[allow(dead_code)]
     pub kalshi_events_ms: u64,
+    #[allow(dead_code)]
     pub kalshi_markets_ms: u64,
+    #[allow(dead_code)]
     pub poly_lookup_ms: u64,
 }
 
@@ -254,6 +260,7 @@ pub async fn fetch_all_poly_tokens(
 }
 
 /// Helper to build Polymarket slug from event details
+#[allow(dead_code)]
 pub fn build_poly_slug(
     prefix: &str,
     home: &str,

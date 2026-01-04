@@ -34,12 +34,15 @@ const DEFAULT_MIN_PROFIT_CENTS: u16 = 1;
 
 /// Default slippage allowance in cents per leg (includes tick rounding worst-case)
 /// TODO: Polymarket tick sizes can be < 1 cent and would require Decimal/bps pricing for full fidelity.
+#[allow(dead_code)]
 const DEFAULT_SLIPPAGE_CENTS_PER_LEG: u16 = 1;
 
 /// Default Polymarket maker fee in basis points (0 = no fee)
+#[allow(dead_code)]
 const DEFAULT_POLY_MAKER_FEE_BPS: u16 = 0;
 
 /// Default Polymarket taker fee in basis points (0 = no fee)
+#[allow(dead_code)]
 const DEFAULT_POLY_TAKER_FEE_BPS: u16 = 0;
 
 // === Mismatch / Unwind Configuration Defaults ===
@@ -183,6 +186,7 @@ pub fn profit_threshold_cents() -> u16 {
 pub enum KalshiRole {
     #[default]
     Taker,
+    #[allow(dead_code)]
     Maker,
 }
 
@@ -191,6 +195,7 @@ pub enum KalshiRole {
 pub enum PolyRole {
     #[default]
     Taker,
+    #[allow(dead_code)]
     Maker,
 }
 
@@ -261,6 +266,7 @@ pub fn min_profit_cents() -> u16 {
 /// This includes worst-case tick/rounding effects.
 /// Reads from SLIPPAGE_CENTS_PER_LEG env var, defaults to 1.
 /// The value is cached after first call.
+#[allow(dead_code)]
 pub fn slippage_cents_per_leg() -> u16 {
     use std::sync::OnceLock;
     use tracing::warn;
@@ -285,6 +291,7 @@ pub fn slippage_cents_per_leg() -> u16 {
 ///
 /// Reads from POLY_MAKER_FEE_BPS env var, defaults to 0.
 /// The value is cached after first call.
+#[allow(dead_code)]
 pub fn poly_maker_fee_bps() -> u16 {
     use std::sync::OnceLock;
     use tracing::warn;
@@ -309,6 +316,7 @@ pub fn poly_maker_fee_bps() -> u16 {
 ///
 /// Reads from POLY_TAKER_FEE_BPS env var, defaults to 0.
 /// The value is cached after first call.
+#[allow(dead_code)]
 pub fn poly_taker_fee_bps() -> u16 {
     use std::sync::OnceLock;
     use tracing::warn;

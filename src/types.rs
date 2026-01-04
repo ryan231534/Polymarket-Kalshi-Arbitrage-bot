@@ -75,6 +75,7 @@ pub const NO_PRICE: PriceCents = 0;
 
 /// Sanitize a price value: if outside valid range [1..=99], return NO_PRICE.
 /// This prevents invalid/sentinel prices from entering the orderbook.
+#[allow(dead_code)]
 #[inline(always)]
 pub fn sanitize_price(price: PriceCents) -> PriceCents {
     if price >= 1 && price <= 99 {
@@ -1753,6 +1754,12 @@ pub struct KalshiMarket {
     pub floor_strike: Option<f64>,
     pub volume: Option<i64>,
     pub liquidity: Option<i64>,
+    /// Market status (e.g., "active", "closed", "settled")
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Expected expiration time (close to actual game end time)
+    #[serde(default)]
+    pub expected_expiration_time: Option<String>,
 }
 
 // === Polymarket/Gamma API Types ===

@@ -21,6 +21,7 @@
 //! - **Concurrent order execution** with automatic position reconciliation
 //! - **Circuit breaker protection** with configurable risk limits
 //! - **Market discovery system** with intelligent caching and incremental updates
+//! - **Live sports discovery** with cross-exchange joining for real-time sports markets
 
 mod cache;
 mod circuit_breaker;
@@ -30,6 +31,7 @@ mod discovery;
 mod execution;
 mod fees;
 mod kalshi;
+mod live_discovery;
 mod logging;
 mod metrics;
 mod mismatch;
@@ -57,11 +59,15 @@ use discovery::DiscoveryClient;
 use execution::{create_execution_channel, run_execution_loop, ExecutionEngine};
 use fees::{Exchange, FeeModel};
 use kalshi::{KalshiApiClient, KalshiConfig};
+use live_discovery::{
+    matched_markets_to_pairs, LeagueSpec, LiveDiscoveryConfig, LiveDiscoveryEngine,
+};
 use metrics::Metrics;
 use pnl::PnLTracker;
+use polymarket::{run_ws as run_poly_ws, GammaClient};
 use polymarket_clob::{PolymarketAsyncClient, PreparedCreds, SharedAsyncClient};
 use position_tracker::{create_position_channel, position_writer_loop, PositionTracker};
-use types::GlobalState;
+use types::{GlobalState, MarketPair};
 
 /// Polymarket CLOB API host
 const POLY_CLOB_HOST: &str = "https://clob.polymarket.com";
@@ -97,12 +103,18 @@ async fn main() -> Result<()> {
         .map(|v| v == "1" || v == "true")
         .unwrap_or(true);
 
+    // Check for discovery-only mode (exits after discovery, no WS/execution)
+    let discovery_only = std::env::var("DISCOVERY_ONLY")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+
     // Create root span for the entire application lifetime
     let root_span = info_span!(
         "arb_bot",
         run_id = %run_id,
         version = "2.0",
         dry_run = dry_run,
+        discovery_only = discovery_only,
         leagues = ?leagues_to_monitor,
         threshold_cents = threshold_cents,
     );
@@ -111,6 +123,10 @@ async fn main() -> Result<()> {
     let _enter = root_span.enter();
 
     info!("🚀 Prediction Market Arbitrage System v2.0");
+
+    if discovery_only {
+        info!("   Mode: DISCOVERY ONLY (will exit after discovery)");
+    }
 
     info!(
         "   Profit threshold: <{} ({:.1}% minimum profit)",
@@ -185,48 +201,195 @@ async fn main() -> Result<()> {
     );
 
     metrics.discovery_runs.inc();
-    let discovery =
-        DiscoveryClient::new(KalshiApiClient::new(KalshiConfig::from_env()?), team_cache);
 
-    let leagues_refs: Vec<&str> = leagues_to_monitor.iter().map(|s| s.as_str()).collect();
-    let result = if force_discovery {
-        discovery.discover_all_force(&leagues_refs).await
-    } else {
-        discovery.discover_all(&leagues_refs).await
-    };
+    // === Live Discovery for Sports Leagues ===
+    // Check if any monitored leagues are sports leagues
+    let live_config = LiveDiscoveryConfig::from_env();
+    let sports_leagues: Vec<LeagueSpec> = leagues_to_monitor
+        .iter()
+        .filter_map(|code| LeagueSpec::from_code(code))
+        .filter(|spec| spec.is_sports)
+        .collect();
 
-    metrics.markets_discovered.set(result.pairs.len() as i64);
-    if !result.errors.is_empty() {
-        metrics.discovery_errors.add(result.errors.len() as u64);
-    }
+    let has_sports_leagues = !sports_leagues.is_empty();
+    let mut live_pairs: Vec<MarketPair> = Vec::new();
 
-    info!("📊 Market discovery complete:");
-    info!("   - Matched market pairs: {}", result.pairs.len());
+    if has_sports_leagues && live_config.live_join_enabled {
+        info!(
+            "🏀 Live sports discovery enabled for {} leagues: {:?}",
+            sports_leagues.len(),
+            sports_leagues
+                .iter()
+                .map(|s| &s.league_code)
+                .collect::<Vec<_>>()
+        );
 
-    if !result.errors.is_empty() {
-        for err in &result.errors {
-            warn!("   ⚠️ {}", err);
+        // Create Gamma client for Polymarket discovery
+        let gamma = Arc::new(GammaClient::new());
+        let live_engine = LiveDiscoveryEngine::with_config(
+            kalshi_api.clone(),
+            gamma.clone(),
+            live_config.clone(),
+        );
+
+        // Run live discovery for all sports leagues
+        let live_results = live_engine.discover_all_leagues(&sports_leagues).await?;
+
+        // Aggregate results
+        let mut total_kalshi_events = 0;
+        let mut total_poly_events = 0;
+        let mut total_matched = 0;
+
+        for result in &live_results {
+            total_kalshi_events += result.kalshi_discovered_count;
+            total_poly_events += result.poly_discovered_count;
+            total_matched += result.matched_markets.len();
+
+            // Convert matched markets to MarketPairs
+            let pairs = matched_markets_to_pairs(&result.matched_markets);
+            live_pairs.extend(pairs);
+        }
+
+        info!(
+            event = "live_discovery_summary",
+            kalshi_open = total_kalshi_events,
+            poly_active = total_poly_events,
+            matched = total_matched,
+            pairs_generated = live_pairs.len(),
+            "📊 Live sports discovery: Kalshi={} open, Poly={} active, {} matched → {} pairs",
+            total_kalshi_events,
+            total_poly_events,
+            total_matched,
+            live_pairs.len()
+        );
+
+        // Log 3 sample pairs
+        for (i, pair) in live_pairs.iter().take(3).enumerate() {
+            info!(
+                event = "live_pair_sample",
+                index = i,
+                kalshi_ticker = %pair.kalshi_market_ticker,
+                poly_yes_token = %pair.poly_yes_token,
+                "  Sample {}: {} (K:{} P:{}...)",
+                i + 1,
+                pair.description,
+                pair.kalshi_market_ticker,
+                &pair.poly_yes_token[..pair.poly_yes_token.len().min(16)]
+            );
         }
     }
 
-    if result.pairs.is_empty() {
+    // === Standard Discovery (slug-based) ===
+    // Run for non-sports leagues, or as fallback if live yields 0 and fallback is enabled
+    let non_sports_leagues: Vec<&str> = leagues_to_monitor
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|code| !LeagueSpec::is_sports_league(code))
+        .collect();
+
+    let need_standard_discovery =
+        !non_sports_leagues.is_empty() || (live_pairs.is_empty() && live_config.fallback_slug_map);
+
+    let standard_pairs = if need_standard_discovery {
+        let discovery =
+            DiscoveryClient::new(KalshiApiClient::new(KalshiConfig::from_env()?), team_cache);
+
+        // Use original leagues for fallback, or non-sports for normal operation
+        let discovery_leagues: Vec<&str> = if live_pairs.is_empty() && live_config.fallback_slug_map
+        {
+            warn!("⚠️ Live discovery yielded 0 pairs, falling back to slug-based discovery");
+            leagues_to_monitor.iter().map(|s| s.as_str()).collect()
+        } else {
+            non_sports_leagues.clone()
+        };
+
+        if discovery_leagues.is_empty() {
+            vec![]
+        } else {
+            let result = if force_discovery {
+                discovery.discover_all_force(&discovery_leagues).await
+            } else {
+                discovery.discover_all(&discovery_leagues).await
+            };
+
+            if !result.errors.is_empty() {
+                for err in &result.errors {
+                    warn!("   ⚠️ Standard discovery error: {}", err);
+                }
+                metrics.discovery_errors.add(result.errors.len() as u64);
+            }
+
+            result.pairs
+        }
+    } else {
+        vec![]
+    };
+
+    // === Merge Results ===
+    let mut all_pairs: Vec<MarketPair> = Vec::new();
+    all_pairs.extend(live_pairs);
+    all_pairs.extend(standard_pairs);
+
+    metrics.markets_discovered.set(all_pairs.len() as i64);
+
+    info!("📊 Market discovery complete:");
+    info!("   - Total matched market pairs: {}", all_pairs.len());
+
+    if all_pairs.is_empty() {
         error!("No market pairs found!");
         return Ok(());
     }
 
     // Display discovered market pairs
     info!("📋 Discovered market pairs:");
-    for pair in &result.pairs {
+    for pair in &all_pairs {
         info!(
             "   ✅ {} | {} | Kalshi: {}",
             pair.description, pair.market_type, pair.kalshi_market_ticker
         );
     }
 
+    // === DISCOVERY_ONLY MODE: Exit after printing results ===
+    if discovery_only {
+        info!("🔍 DISCOVERY_ONLY mode: printing detailed results and exiting");
+        info!(
+            event = "discovery_only_summary",
+            total_pairs = all_pairs.len(),
+            "=== Discovery Summary ==="
+        );
+
+        // Print 3 sample pairs with full token details
+        info!("📋 Sample matched pairs with subscription IDs:");
+        for (i, pair) in all_pairs.iter().take(3).enumerate() {
+            info!(
+                event = "discovery_only_sample",
+                index = i,
+                kalshi_ticker = %pair.kalshi_market_ticker,
+                poly_yes_token = %pair.poly_yes_token,
+                poly_no_token = %pair.poly_no_token,
+                league = %pair.league,
+                market_type = %pair.market_type,
+                "  [{}/{}] {} | K:{} | P_yes:{} | P_no:{}",
+                i + 1,
+                all_pairs.len().min(3),
+                pair.description,
+                pair.kalshi_market_ticker,
+                pair.poly_yes_token,
+                pair.poly_no_token
+            );
+        }
+
+        info!("✅ Discovery complete. Exiting without starting WS/execution.");
+        return Ok(());
+    }
+
+    // Replace result.pairs with all_pairs for downstream usage
+    let result_pairs = all_pairs;
+
     // Build global state
     let state = Arc::new({
         let mut s = GlobalState::new();
-        for pair in result.pairs {
+        for pair in result_pairs {
             s.add_pair(pair);
         }
         info!(
@@ -235,6 +398,53 @@ async fn main() -> Result<()> {
         );
         s
     });
+
+    // === Log WS subscription details ===
+    {
+        let market_count = state.market_count();
+        let kalshi_tickers: Vec<String> = state
+            .markets
+            .iter()
+            .take(market_count)
+            .filter_map(|m| m.pair.as_ref().map(|p| p.kalshi_market_ticker.to_string()))
+            .collect();
+        let poly_tokens: Vec<String> = state
+            .markets
+            .iter()
+            .take(market_count)
+            .filter_map(|m| m.pair.as_ref())
+            .flat_map(|p| vec![p.poly_yes_token.to_string(), p.poly_no_token.to_string()])
+            .collect();
+
+        info!(
+            event = "ws_subscriptions_prepared",
+            kalshi_tickers_count = kalshi_tickers.len(),
+            poly_tokens_count = poly_tokens.len(),
+            "📡 WebSocket subscriptions: {} Kalshi tickers, {} Polymarket tokens",
+            kalshi_tickers.len(),
+            poly_tokens.len()
+        );
+
+        // Log sample subscriptions
+        if let Some(first_market) = state
+            .markets
+            .iter()
+            .take(market_count)
+            .find_map(|m| m.pair.as_ref())
+        {
+            info!(
+                event = "ws_subscription_sample",
+                kalshi_ticker = %first_market.kalshi_market_ticker,
+                poly_yes_token = %first_market.poly_yes_token,
+                poly_no_token = %first_market.poly_no_token,
+                description = %first_market.description,
+                "  Sample: {} (K:{} P_yes:{}...)",
+                first_market.description,
+                first_market.kalshi_market_ticker,
+                &first_market.poly_yes_token[..first_market.poly_yes_token.len().min(20)]
+            );
+        }
+    }
 
     // Initialize execution infrastructure
     let (exec_tx, exec_rx) = create_execution_channel();
@@ -509,6 +719,123 @@ async fn main() -> Result<()> {
             }
         }
     });
+
+    // === Live Sports Discovery Refresh Loop ===
+    // More frequent refresh for sports leagues using live join
+    let live_refresh_state = state.clone();
+    let live_refresh_kalshi = kalshi_api.clone();
+    let live_refresh_leagues = sports_leagues.clone();
+    let live_refresh_config = live_config.clone();
+    let live_refresh_handle = if has_sports_leagues && live_config.live_join_enabled {
+        let refresh_secs = live_config.refresh_interval_secs;
+        Some(tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(refresh_secs));
+            interval.tick().await; // Skip first tick (already did discovery at startup)
+
+            loop {
+                interval.tick().await;
+                info!(
+                    event = "live_refresh_start",
+                    "🔄 Running live sports discovery refresh..."
+                );
+
+                // Create fresh Gamma client for each refresh
+                let gamma = Arc::new(GammaClient::new());
+                let engine = LiveDiscoveryEngine::with_config(
+                    live_refresh_kalshi.clone(),
+                    gamma,
+                    live_refresh_config.clone(),
+                );
+
+                // Run discovery for all sports leagues
+                match engine.discover_all_leagues(&live_refresh_leagues).await {
+                    Ok(results) => {
+                        let mut total_kalshi = 0;
+                        let mut total_poly = 0;
+                        let mut total_matched = 0;
+                        let mut new_pairs: Vec<MarketPair> = Vec::new();
+
+                        for result in &results {
+                            total_kalshi += result.kalshi_discovered_count;
+                            total_poly += result.poly_discovered_count;
+                            total_matched += result.matched_markets.len();
+                            new_pairs.extend(matched_markets_to_pairs(&result.matched_markets));
+                        }
+
+                        let current_count = live_refresh_state.market_count();
+
+                        info!(
+                            event = "live_refresh_complete",
+                            kalshi_open = total_kalshi,
+                            poly_active = total_poly,
+                            matched = total_matched,
+                            new_pairs = new_pairs.len(),
+                            current_subscribed = current_count,
+                            "📊 Live refresh: K={}, P={}, matched={}, pairs={} (current={})",
+                            total_kalshi,
+                            total_poly,
+                            total_matched,
+                            new_pairs.len(),
+                            current_count
+                        );
+
+                        // Diff against currently subscribed pairs
+                        let current_tickers: std::collections::HashSet<String> = live_refresh_state
+                            .markets
+                            .iter()
+                            .take(current_count)
+                            .filter_map(|m| {
+                                m.pair.as_ref().map(|p| p.kalshi_market_ticker.to_string())
+                            })
+                            .collect();
+
+                        let new_tickers: std::collections::HashSet<String> = new_pairs
+                            .iter()
+                            .map(|p| p.kalshi_market_ticker.to_string())
+                            .collect();
+
+                        let added: Vec<_> = new_tickers.difference(&current_tickers).collect();
+                        let removed: Vec<_> = current_tickers.difference(&new_tickers).collect();
+
+                        if !added.is_empty() {
+                            info!(
+                                event = "live_refresh_new_markets",
+                                count = added.len(),
+                                "🆕 {} new markets detected (requires restart to subscribe)",
+                                added.len()
+                            );
+                            for ticker in added.iter().take(5) {
+                                info!("   + {}", ticker);
+                            }
+                        }
+
+                        if !removed.is_empty() {
+                            warn!(
+                                event = "live_refresh_stale_markets",
+                                count = removed.len(),
+                                "⚠️ {} stale markets detected (no longer in discovery)",
+                                removed.len()
+                            );
+                            for ticker in removed.iter().take(5) {
+                                warn!("   - {}", ticker);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            event = "live_refresh_error",
+                            error = %e,
+                            "Failed to run live sports refresh: {}",
+                            e
+                        );
+                    }
+                }
+            }
+        }))
+    } else {
+        None
+    };
 
     // System health monitoring and arbitrage diagnostics
     let heartbeat_state = state.clone();

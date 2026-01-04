@@ -11,7 +11,7 @@ repository = "https://github.com/terauss/prediction-market-arbitrage"
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 ethers = { version = "2.0", features = ["legacy"] }
 futures-util = "0.3"

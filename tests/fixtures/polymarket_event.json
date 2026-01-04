@@ -1,0 +1,33 @@
+{
+  "id": "poly-event-12345",
+  "slug": "nfl-buffalo-bills-vs-detroit-lions-2026-01-05",
+  "title": "Will Buffalo Bills defeat Detroit Lions?",
+  "description": "NFL Week 18 game between Buffalo Bills and Detroit Lions",
+  "startDate": "2026-01-05T18:00:00Z",
+  "endDate": "2026-01-05T22:00:00Z",
+  "active": true,
+  "closed": false,
+  "tags": [
+    {"id": "nfl", "slug": "nfl", "label": "NFL"}
+  ],
+  "markets": [
+    {
+      "id": "pm-buf-12345",
+      "question": "Will Buffalo Bills win?",
+      "slug": "nfl-buffalo-bills-vs-detroit-lions-2026-01-05-bills-win",
+      "active": true,
+      "closed": false,
+      "clobTokenIds": "[\"12345678901234567890123456789012345678901234567890123456789012ab\",\"12345678901234567890123456789012345678901234567890123456789012cd\"]",
+      "outcomes": "[\"Yes\",\"No\"]"
+    },
+    {
+      "id": "pm-det-12345",
+      "question": "Will Detroit Lions win?",
+      "slug": "nfl-buffalo-bills-vs-detroit-lions-2026-01-05-lions-win",
+      "active": true,
+      "closed": false,
+      "clobTokenIds": "[\"22345678901234567890123456789012345678901234567890123456789012ab\",\"22345678901234567890123456789012345678901234567890123456789012cd\"]",
+      "outcomes": "[\"Yes\",\"No\"]"
+    }
+  ]
+}

@@ -93,10 +93,12 @@ const POLY_FALLBACK_MAKER_BPS: u16 = 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CostMode {
     /// Detection fast path - NEVER blocks, uses cached fees or conservative fallback
+    #[allow(dead_code)]
     DetectionFast,
     /// Execution gate - uses cached fees, triggers async refresh if needed
     ExecutionTruth,
     /// P&L recording - uses actual fill data to avoid double-counting
+    #[allow(dead_code)]
     PnLTruth,
 }
 
@@ -108,6 +110,7 @@ pub enum FeeVenue {
 }
 
 /// Trade side
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TradeSide {
     Buy,
@@ -118,12 +121,14 @@ pub enum TradeSide {
 #[derive(Debug, Clone, Copy)]
 pub struct AllInCost {
     /// Gross notional in cents (price × qty)
+    #[allow(dead_code)]
     pub gross_cents: i64,
     /// Fee in cents (computed or from fill)
     pub fee_cents: i64,
     /// Total cost in cents (gross + fee, unless fee already included)
     pub total_cents: i64,
     /// Whether fee is already included in total (important for P&L)
+    #[allow(dead_code)]
     pub fee_included_in_total: bool,
 }
 
@@ -139,6 +144,7 @@ impl AllInCost {
     }
 
     /// Create when fee is already included in total
+    #[allow(dead_code)]
     pub fn from_total_with_fee_included(total_cents: i64, inferred_fee_cents: i64) -> Self {
         Self {
             gross_cents: total_cents - inferred_fee_cents,
@@ -157,6 +163,7 @@ pub enum Exchange {
 }
 
 /// Trade action (buy or sell)
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Buy,
@@ -171,6 +178,7 @@ pub struct PolyFeeConfig {
     /// Taker fee in basis points
     pub taker_bps: u16,
     /// Whether this is a fallback (logged once)
+    #[allow(dead_code)]
     pub is_fallback: bool,
 }
 
@@ -338,6 +346,7 @@ impl FeeModel {
     /// Estimate fees for both legs of an arbitrage trade
     ///
     /// Returns (poly_fee_cents, kalshi_fee_cents, total_fee_cents)
+    #[allow(dead_code)]
     pub async fn estimate_arb_fees(
         &self,
         poly_token_id: &str,

@@ -96,6 +96,7 @@ impl Metrics {
     }
 
     /// Export metrics in Prometheus text format
+    #[allow(dead_code)]
     pub fn export_prometheus(&self) -> String {
         let mut output = String::new();
 
@@ -324,6 +325,7 @@ impl Default for Metrics {
 /// Atomic counter for monotonically increasing metrics
 #[derive(Debug)]
 pub struct Counter {
+    #[allow(dead_code)]
     name: &'static str,
     value: AtomicU64,
 }
@@ -342,6 +344,7 @@ impl Counter {
     }
 
     /// Increment counter by n
+    #[allow(dead_code)]
     pub fn add(&self, n: u64) {
         self.value.fetch_add(n, Ordering::Relaxed);
     }
@@ -352,6 +355,7 @@ impl Counter {
     }
 
     /// Get metric name
+    #[allow(dead_code)]
     pub fn name(&self) -> &'static str {
         self.name
     }
@@ -360,6 +364,7 @@ impl Counter {
 /// Atomic gauge for metrics that can go up or down
 #[derive(Debug)]
 pub struct Gauge {
+    #[allow(dead_code)]
     name: &'static str,
     value: AtomicU64,
 }
@@ -379,16 +384,19 @@ impl Gauge {
     }
 
     /// Increment gauge by 1
+    #[allow(dead_code)]
     pub fn inc(&self) {
         self.value.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Decrement gauge by 1
+    #[allow(dead_code)]
     pub fn dec(&self) {
         self.value.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Add to gauge
+    #[allow(dead_code)]
     pub fn add(&self, n: i64) {
         if n >= 0 {
             self.value.fetch_add(n as u64, Ordering::Relaxed);
@@ -403,18 +411,21 @@ impl Gauge {
     }
 
     /// Get metric name
+    #[allow(dead_code)]
     pub fn name(&self) -> &'static str {
         self.name
     }
 }
 
 /// Timer for measuring operation duration
+#[allow(dead_code)]
 pub struct Timer {
     start: Instant,
 }
 
 impl Timer {
     /// Start a new timer
+    #[allow(dead_code)]
     pub fn start() -> Self {
         Self {
             start: Instant::now(),
@@ -422,11 +433,13 @@ impl Timer {
     }
 
     /// Get elapsed time in milliseconds
+    #[allow(dead_code)]
     pub fn elapsed_ms(&self) -> u64 {
         self.start.elapsed().as_millis() as u64
     }
 
     /// Get elapsed time in microseconds
+    #[allow(dead_code)]
     pub fn elapsed_us(&self) -> u64 {
         self.start.elapsed().as_micros() as u64
     }

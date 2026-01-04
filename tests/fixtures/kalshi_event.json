@@ -1,0 +1,33 @@
+{
+  "event_ticker": "KXNFLGAME-26JAN05BUFDET",
+  "title": "Buffalo Bills vs Detroit Lions",
+  "series_ticker": "KXNFLGAME",
+  "mutually_exclusive": true,
+  "category": "Sports",
+  "sub_title": "NFL Week 18",
+  "open_time": "2026-01-01T12:00:00Z",
+  "close_time": "2026-01-05T18:00:00Z",
+  "expected_expiration_time": "2026-01-05T22:00:00Z",
+  "markets": [
+    {
+      "ticker": "KXNFLGAME-26JAN05BUFDET-BUF",
+      "title": "Buffalo Bills to Win",
+      "subtitle": "Moneyline",
+      "status": "open",
+      "floor_strike": null,
+      "cap_strike": null,
+      "yes_sub_title": "Buffalo wins",
+      "no_sub_title": "Buffalo loses"
+    },
+    {
+      "ticker": "KXNFLGAME-26JAN05BUFDET-DET",
+      "title": "Detroit Lions to Win",
+      "subtitle": "Moneyline",
+      "status": "open",
+      "floor_strike": null,
+      "cap_strike": null,
+      "yes_sub_title": "Detroit wins",
+      "no_sub_title": "Detroit loses"
+    }
+  ]
+}

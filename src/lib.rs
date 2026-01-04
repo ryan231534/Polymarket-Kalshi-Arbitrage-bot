@@ -13,6 +13,7 @@ pub mod execution;
 mod execution_tests;
 pub mod fees;
 pub mod kalshi;
+pub mod live_discovery;
 pub mod logging;
 pub mod metrics;
 pub mod mismatch;

@@ -50,6 +50,7 @@ impl RetryPolicy {
     }
 
     /// Create a default retry policy (same as from_env with defaults)
+    #[allow(dead_code)]
     pub fn default() -> Self {
         Self {
             max_attempts: 4,

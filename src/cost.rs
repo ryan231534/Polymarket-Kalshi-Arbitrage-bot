@@ -24,6 +24,7 @@ use crate::config::{KalshiRole, PolyRole};
 use crate::types::{ArbType, FastExecutionRequest};
 
 /// Configuration for all-in cost calculations
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct AllInCfg {
     /// Kalshi fee role (taker or maker)
@@ -40,6 +41,7 @@ pub struct AllInCfg {
 
 impl AllInCfg {
     /// Create config from environment variables
+    #[allow(dead_code)]
     pub fn from_env() -> Self {
         Self {
             kalshi_role: crate::config::kalshi_fee_role(),
@@ -145,6 +147,7 @@ pub fn poly_fee_total_cents(
 ///
 /// # Returns
 /// Total slippage in cents
+#[allow(dead_code)]
 #[inline]
 pub fn slippage_total_cents(legs: u32, contracts: u32, slippage_cents_per_leg: u16) -> u32 {
     legs * contracts * slippage_cents_per_leg as u32
@@ -170,6 +173,7 @@ pub fn slippage_total_cents(legs: u32, contracts: u32, slippage_cents_per_leg: u
 ///
 /// # Returns
 /// Total all-in cost in cents
+#[allow(dead_code)]
 #[inline]
 pub fn all_in_cost_total_cents(req: &FastExecutionRequest, contracts: u32, cfg: &AllInCfg) -> u32 {
     let yes_premium = req.yes_price as u32 * contracts;
@@ -242,6 +246,7 @@ pub fn all_in_cost_total_cents(req: &FastExecutionRequest, contracts: u32, cfg: 
 ///
 /// # Returns
 /// Expected profit in cents (can be negative)
+#[allow(dead_code)]
 #[inline]
 pub fn expected_profit_total_cents(
     req: &FastExecutionRequest,
@@ -255,6 +260,7 @@ pub fn expected_profit_total_cents(
 }
 
 /// Result of all-in cost analysis for logging
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AllInAnalysis {
     pub contracts: u32,
@@ -279,6 +285,7 @@ pub struct AllInAnalysis {
 ///
 /// # Returns
 /// Analysis result with pass/fail status
+#[allow(dead_code)]
 pub fn analyze_all_in(
     req: &FastExecutionRequest,
     contracts: u32,

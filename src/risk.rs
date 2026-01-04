@@ -66,6 +66,7 @@ impl SizingConfig {
     }
 
     /// Create config with explicit values (for testing)
+    #[allow(dead_code)]
     pub fn new(
         max_fraction_bps: u32,
         max_qty_per_trade: u32,
@@ -116,6 +117,7 @@ impl BankrollConfig {
     }
 
     /// Create config with explicit values (for testing)
+    #[allow(dead_code)]
     pub fn new(kalshi_cash_cents: i64, poly_cash_cents: i64) -> Self {
         Self {
             kalshi_cash_cents,

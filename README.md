@@ -296,6 +296,85 @@ FORCE_DISCOVERY=1 dotenvx run -- cargo run --release
 
 ---
 
+## Live Sports Discovery & Join
+
+The **Live Discovery Engine** automatically discovers and matches live sports markets between Kalshi and Polymarket using metadata-based joining rather than brittle slug generation.
+
+### How It Works
+
+1. **Parallel Discovery**: Fetches active events from both Kalshi REST API and Polymarket Gamma API
+2. **Normalization**: Extracts and normalizes team names, start times, and leagues from each event
+3. **Matchup Key Generation**: Builds symmetric matchup keys (e.g., `bills_lions_2025-01-05`) that match regardless of home/away ordering
+4. **Join**: Matches markets with identical normalized keys and start times within tolerance (±2 hours)
+5. **MarketPair Conversion**: Converts matched markets to the existing `MarketPair` format for WebSocket subscription
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LIVE_JOIN` | `1` | Enable live discovery engine (`0` = disable) |
+| `FALLBACK_SLUG_MAP` | `0` | Include legacy slug-based mappings as fallback |
+| `DISCOVERY_ONLY` | `0` | Exit after printing discovered markets (no WS/execution) |
+| `LIVE_DISCOVERY_REFRESH_SECS` | `300` | Seconds between discovery refresh cycles |
+| `LIVE_DISCOVERY_TIME_TOLERANCE_SECS` | `7200` | Max time difference for market matching (2 hours) |
+
+### Supported Leagues
+
+- **NFL**: Full team name and city alias support (e.g., "Bills", "Buffalo Bills", "Buffalo")
+- **NHL**: 16+ teams with nickname aliases (e.g., "Bruins" → "Boston Bruins")
+- **MLB**: 16+ teams with nickname aliases (e.g., "Yankees" → "New York Yankees")
+- **NCAAF**: 15+ major programs (e.g., "Buckeyes" → "Ohio State")
+- **NCAAMB**: 10+ major programs with common abbreviations
+
+### Usage Examples
+
+```bash
+# Discovery-only mode: print matches and exit (useful for debugging)
+DISCOVERY_ONLY=1 RUST_LOG=info cargo run --release
+
+# Force fresh discovery without cache
+FORCE_DISCOVERY=1 LIVE_JOIN=1 cargo run --release
+
+# Enable live discovery with faster refresh (60 seconds)
+LIVE_DISCOVERY_REFRESH_SECS=60 cargo run --release
+
+# Combine live discovery with legacy fallback
+LIVE_JOIN=1 FALLBACK_SLUG_MAP=1 cargo run --release
+```
+
+### Refresh Loop Behavior
+
+When `LIVE_DISCOVERY_REFRESH_SECS > 0`, the bot spawns a background task that:
+
+1. Re-runs discovery at the configured interval
+2. Computes diffs to detect **new** and **stale** markets
+3. Logs new matches with team names and start times
+4. Logs stale markets that are no longer available
+5. Does **not** mutate global state (future: dynamic subscription updates)
+
+### Diagnostics Output
+
+When `DISCOVERY_ONLY=1`, the bot outputs detailed match information:
+
+```
+🔍 LIVE DISCOVERY RESULTS
+─────────────────────────────
+Kalshi events fetched: 47
+Polymarket events fetched: 32
+Matched markets: 12
+
+Match #1:
+  Kalshi: BUF-DET → NFL:Buffalo Bills vs Detroit Lions
+  Polymarket: Will Buffalo Bills beat Detroit Lions?
+  Start: 2025-01-05T18:00:00Z
+  Key: bills_lions_2025-01-05
+
+Match #2:
+  ...
+```
+
+---
+
 ## How It Works
 
 ### Arbitrage Mechanics
