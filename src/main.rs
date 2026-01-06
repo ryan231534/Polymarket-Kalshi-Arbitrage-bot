@@ -76,6 +76,10 @@ const POLYGON_CHAIN_ID: u64 = 137;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env FIRST before any config/logging initialization
+    // This ensures all environment variables from .env are available for OnceLock caching
+    dotenvy::dotenv().ok();
+
     // Initialize structured logging with file rotation
     // Keep guard alive for program lifetime to ensure non-blocking writer flushes
     let _log_guard = logging::init_logging();
@@ -150,7 +154,6 @@ async fn main() -> Result<()> {
     info!("[KALSHI] API key loaded");
 
     // Load Polymarket credentials
-    dotenvy::dotenv().ok();
     let poly_private_key = std::env::var("POLY_PRIVATE_KEY").context("POLY_PRIVATE_KEY not set")?;
     let poly_funder =
         std::env::var("POLY_FUNDER").context("POLY_FUNDER not set (your wallet address)")?;

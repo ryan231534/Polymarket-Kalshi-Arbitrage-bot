@@ -2,18 +2,24 @@
 //!
 //! This module handles discovering active/open Polymarket sports events
 //! using the Gamma API, which provides market metadata including CLOB token IDs.
+//!
+//! ## Live Games Filtering
+//!
+//! When `LIVE_GAMES_MODE` is set to "window" or "in_play", this module filters
+//! out non-game events (awards, futures) and only returns actual game markets.
 
 use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::Deserialize;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::GAMMA_API_BASE;
 use crate::polymarket::GammaClient;
 
 use super::normalize::parse_teams_from_title;
 use super::types::{PolyEventMeta, PolyMarketMeta};
+use super::{LiveGamesConfig, LiveGamesMode};
 
 /// Configuration for Polymarket discovery
 #[derive(Debug, Clone)]
@@ -26,6 +32,8 @@ pub struct PolyDiscoveryConfig {
     pub active_only: bool,
     /// Exclude closed markets
     pub closed_filter: bool,
+    /// Live games filtering configuration
+    pub live_games: LiveGamesConfig,
 }
 
 impl Default for PolyDiscoveryConfig {
@@ -35,6 +43,7 @@ impl Default for PolyDiscoveryConfig {
             series_slug_prefix: None,
             active_only: true,
             closed_filter: false,
+            live_games: LiveGamesConfig::default(),
         }
     }
 }
@@ -85,6 +94,12 @@ struct GammaMarketInEvent {
 ///
 /// Uses Gamma API events endpoint to query sports events directly.
 /// The events endpoint returns complete event objects with embedded markets.
+///
+/// ## Filtering Pipeline
+///
+/// 1. Fetch all events matching tag/slug prefix
+/// 2. Filter to "game-only" events (has teams, has start time, has arb-able markets)
+/// 3. Apply time window filter based on LIVE_GAMES_MODE
 pub async fn discover_poly_events(
     _gamma: &Arc<GammaClient>,
     config: &PolyDiscoveryConfig,
@@ -138,49 +153,172 @@ pub async fn discover_poly_events(
 
     let events: Vec<GammaEventResponse> = resp.json().await?;
 
-    info!("Fetched {} Polymarket events from Gamma API", events.len());
+    let total_fetched = events.len();
+    info!("Fetched {} Polymarket events from Gamma API", total_fetched);
 
-    // Filter by slug prefix and end date
     let now = Utc::now();
-    let filtered_events: Vec<&GammaEventResponse> = events
-        .iter()
-        .filter(|e| {
-            // Must have end date in the future
-            let is_future = e
-                .end_date
+
+    // Track exclusion reasons for logging
+    let mut excluded_no_teams = 0;
+    let mut excluded_no_start_time = 0;
+    let mut excluded_no_arb_markets = 0;
+    let mut excluded_time_window = 0;
+    let mut excluded_past = 0;
+    let mut exclusion_samples: Vec<(String, String)> = Vec::new(); // (title, reason)
+
+    // Collect game events
+    let mut game_events: Vec<PolyEventMeta> = Vec::new();
+
+    for event in &events {
+        let slug = match &event.slug {
+            Some(s) => s.clone(),
+            None => continue,
+        };
+        let title = match &event.title {
+            Some(t) => t.clone(),
+            None => continue,
+        };
+
+        // Filter by slug prefix if specified
+        if let Some(prefix) = &config.series_slug_prefix {
+            if !slug.starts_with(prefix) {
+                continue;
+            }
+        }
+
+        // Parse start time (required for game events)
+        let start_time = event
+            .game_start_time
+            .as_ref()
+            .or(event.start_time.as_ref())
+            .and_then(|s| parse_gamma_datetime(s));
+
+        // Parse end time for in_play mode
+        let end_time = event
+            .end_date
+            .as_ref()
+            .and_then(|s| parse_gamma_datetime(s));
+
+        // === GAME-ONLY FILTER (when not in tradeable mode) ===
+        if config.live_games.mode != LiveGamesMode::Tradeable {
+            // 1. Must have parseable teams (home vs away)
+            let has_teams = parse_teams_from_title(&title).is_some();
+            if !has_teams {
+                excluded_no_teams += 1;
+                if exclusion_samples.len() < 5 {
+                    exclusion_samples.push((
+                        title.clone(),
+                        "no teams parsed (likely award/future)".to_string(),
+                    ));
+                }
+                continue;
+            }
+
+            // 2. Must have a start time
+            if start_time.is_none() {
+                excluded_no_start_time += 1;
+                if exclusion_samples.len() < 5 {
+                    exclusion_samples.push((title.clone(), "missing start time".to_string()));
+                }
+                continue;
+            }
+
+            // 3. Must have at least one arb-able market type (moneyline/spread/total/puckline)
+            let has_arb_market = event
+                .markets
                 .as_ref()
-                .and_then(|d| DateTime::parse_from_rfc3339(d).ok())
-                .map(|dt| dt > now)
+                .map(|mks| {
+                    mks.iter().any(|m| {
+                        // Check sportsMarketType
+                        // Note: NHL uses "puckline" instead of "spread"
+                        let by_type = m
+                            .sports_market_type
+                            .as_ref()
+                            .map(|t| {
+                                matches!(
+                                    t.to_lowercase().as_str(),
+                                    "moneyline" | "spread" | "total" | "game" | "puckline" | "puck line"
+                                )
+                            })
+                            .unwrap_or(false);
+
+                        // Check slug for market type keywords
+                        let by_slug = m
+                            .slug
+                            .as_ref()
+                            .map(|s| {
+                                let s_lower = s.to_lowercase();
+                                s_lower.contains("spread")
+                                    || s_lower.contains("total")
+                                    || s_lower.contains("moneyline")
+                                    || s_lower.contains("-winner")
+                                    || s_lower.contains("win-")
+                                    || s_lower.contains("puckline")
+                                    || s_lower.contains("puck-line")
+                            })
+                            .unwrap_or(false);
+
+                        by_type || by_slug
+                    })
+                })
                 .unwrap_or(false);
 
+            if !has_arb_market {
+                excluded_no_arb_markets += 1;
+                if exclusion_samples.len() < 5 {
+                    exclusion_samples.push((
+                        title.clone(),
+                        "no arb-able market type (moneyline/spread/total/puckline)".to_string(),
+                    ));
+                }
+                continue;
+            }
+
+            // 4. Apply time window filter
+            if !config.live_games.is_in_window(start_time, end_time) {
+                excluded_time_window += 1;
+                if exclusion_samples.len() < 5 {
+                    let reason = match start_time {
+                        Some(st) => format!("outside time window (starts {})", st),
+                        None => "outside time window".to_string(),
+                    };
+                    exclusion_samples.push((title.clone(), reason));
+                }
+                continue;
+            }
+        } else {
+            // Tradeable mode: just check future end date
+            let is_future = end_time.map(|dt| dt > now).unwrap_or(false);
+
             if !is_future {
-                return false;
+                excluded_past += 1;
+                continue;
             }
+        }
 
-            // Filter by slug prefix if specified
-            if let Some(prefix) = &config.series_slug_prefix {
-                e.slug
-                    .as_ref()
-                    .map(|s| s.starts_with(prefix))
-                    .unwrap_or(false)
-            } else {
-                true
-            }
-        })
-        .collect();
+        // Build PolyEventMeta
+        if let Some(meta) = build_poly_event_from_gamma_event(event) {
+            game_events.push(meta);
+        }
+    }
 
+    // Log filtering summary
+    let game_count = game_events.len();
     info!(
-        "Filtered to {} events matching criteria (future end date, slug prefix)",
-        filtered_events.len()
+        "Polymarket filtering: {} total -> {} games ({} no teams, {} no start time, {} no arb markets, {} outside window, {} past)",
+        total_fetched, game_count, excluded_no_teams, excluded_no_start_time,
+        excluded_no_arb_markets, excluded_time_window, excluded_past
     );
 
-    // Convert to PolyEventMeta
-    let poly_events: Vec<PolyEventMeta> = filtered_events
-        .into_iter()
-        .filter_map(build_poly_event_from_gamma_event)
-        .collect();
+    // Log sample exclusions
+    if !exclusion_samples.is_empty() {
+        warn!("Sample excluded Polymarket events:");
+        for (title, reason) in exclusion_samples.iter().take(5) {
+            warn!("  - {} | {}", title, reason);
+        }
+    }
 
-    Ok(poly_events)
+    Ok(game_events)
 }
 
 /// Build PolyEventMeta from Gamma event response
@@ -236,8 +374,16 @@ fn build_poly_market_from_embedded(market: &GammaMarketInEvent) -> Option<PolyMa
     let clob_token_id_no = clob_no?;
 
     // Determine market type
-    let market_type = market.sports_market_type.clone().unwrap_or_else(|| {
-        if slug.contains("spread") {
+    // Note: NHL "puckline" is equivalent to spread for arbitrage purposes
+    let market_type = market.sports_market_type.clone().map(|t| {
+        let t_lower = t.to_lowercase();
+        if t_lower == "puckline" || t_lower == "puck line" {
+            "spread".to_string() // Normalize puckline to spread
+        } else {
+            t
+        }
+    }).unwrap_or_else(|| {
+        if slug.contains("spread") || slug.contains("puckline") || slug.contains("puck-line") {
             "spread".to_string()
         } else if slug.contains("total") {
             "total".to_string()

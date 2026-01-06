@@ -597,104 +597,261 @@ fn build_default_aliases() -> HashMap<String, String> {
     );
 
     // NBA teams
-    add_aliases(&mut aliases, "atlanta hawks", &["hawks", "atl hawks"]);
-    add_aliases(&mut aliases, "boston celtics", &["celtics", "bos celtics"]);
+    // Note: Kalshi uses city-only names (e.g., "houston"), while Polymarket uses full names
+    // (e.g., "houston rockets"). City-only aliases are added for cross-platform matching.
+    add_aliases(
+        &mut aliases,
+        "atlanta hawks",
+        &["hawks", "atl hawks", "atlanta"],
+    );
+    add_aliases(
+        &mut aliases,
+        "boston celtics",
+        &["celtics", "bos celtics", "boston"],
+    );
     add_aliases(
         &mut aliases,
         "brooklyn nets",
-        &["nets", "bkn nets", "new jersey nets"],
+        &["nets", "bkn nets", "new jersey nets", "brooklyn"],
     );
     add_aliases(
         &mut aliases,
         "charlotte hornets",
-        &["hornets", "cha hornets", "charlotte bobcats"],
+        &["hornets", "cha hornets", "charlotte bobcats", "charlotte"],
     );
-    add_aliases(&mut aliases, "chicago bulls", &["bulls", "chi bulls"]);
+    add_aliases(
+        &mut aliases,
+        "chicago bulls",
+        &["bulls", "chi bulls", "chicago"],
+    );
     add_aliases(
         &mut aliases,
         "cleveland cavaliers",
-        &["cavaliers", "cavs", "cle cavaliers"],
+        &["cavaliers", "cavs", "cle cavaliers", "cleveland"],
     );
     add_aliases(
         &mut aliases,
         "dallas mavericks",
-        &["mavericks", "mavs", "dal mavericks"],
+        &["mavericks", "mavs", "dal mavericks", "dallas"],
     );
-    add_aliases(&mut aliases, "denver nuggets", &["nuggets", "den nuggets"]);
-    add_aliases(&mut aliases, "detroit pistons", &["pistons", "det pistons"]);
+    add_aliases(
+        &mut aliases,
+        "denver nuggets",
+        &["nuggets", "den nuggets", "denver"],
+    );
+    add_aliases(
+        &mut aliases,
+        "detroit pistons",
+        &["pistons", "det pistons", "detroit"],
+    );
     add_aliases(
         &mut aliases,
         "golden state warriors",
-        &["warriors", "gsw", "gs warriors"],
+        &["warriors", "gsw", "gs warriors", "golden state"],
     );
-    add_aliases(&mut aliases, "houston rockets", &["rockets", "hou rockets"]);
-    add_aliases(&mut aliases, "indiana pacers", &["pacers", "ind pacers"]);
+    add_aliases(
+        &mut aliases,
+        "houston rockets",
+        &["rockets", "hou rockets", "houston"],
+    );
+    add_aliases(
+        &mut aliases,
+        "indiana pacers",
+        &["pacers", "ind pacers", "indiana"],
+    );
     add_aliases(
         &mut aliases,
         "los angeles clippers",
-        &["clippers", "la clippers", "lac"],
+        &["clippers", "la clippers", "lac", "los angeles c"],
     );
     add_aliases(
         &mut aliases,
         "los angeles lakers",
-        &["lakers", "la lakers", "lal"],
+        &["lakers", "la lakers", "lal", "los angeles l"],
     );
     add_aliases(
         &mut aliases,
         "memphis grizzlies",
-        &["grizzlies", "mem grizzlies", "vancouver grizzlies"],
+        &["grizzlies", "mem grizzlies", "vancouver grizzlies", "memphis"],
     );
-    add_aliases(&mut aliases, "miami heat", &["heat", "mia heat"]);
-    add_aliases(&mut aliases, "milwaukee bucks", &["bucks", "mil bucks"]);
+    add_aliases(
+        &mut aliases,
+        "miami heat",
+        &["heat", "mia heat", "miami"],
+    );
+    add_aliases(
+        &mut aliases,
+        "milwaukee bucks",
+        &["bucks", "mil bucks", "milwaukee"],
+    );
     add_aliases(
         &mut aliases,
         "minnesota timberwolves",
-        &["timberwolves", "wolves", "min timberwolves"],
+        &["timberwolves", "wolves", "min timberwolves", "minnesota"],
     );
     add_aliases(
         &mut aliases,
         "new orleans pelicans",
-        &["pelicans", "nop", "no pelicans", "new orleans hornets"],
+        &["pelicans", "nop", "no pelicans", "new orleans hornets", "new orleans"],
     );
     add_aliases(
         &mut aliases,
         "new york knicks",
-        &["knicks", "ny knicks", "nyk"],
+        &["knicks", "ny knicks", "nyk", "new york"],
     );
     add_aliases(
         &mut aliases,
         "oklahoma city thunder",
-        &["thunder", "okc thunder", "seattle supersonics"],
+        &["thunder", "okc thunder", "seattle supersonics", "oklahoma city"],
     );
-    add_aliases(&mut aliases, "orlando magic", &["magic", "orl magic"]);
+    add_aliases(
+        &mut aliases,
+        "orlando magic",
+        &["magic", "orl magic", "orlando"],
+    );
     add_aliases(
         &mut aliases,
         "philadelphia 76ers",
-        &["76ers", "sixers", "phi 76ers"],
+        &["76ers", "sixers", "phi 76ers", "philadelphia"],
     );
-    add_aliases(&mut aliases, "phoenix suns", &["suns", "phx suns"]);
+    add_aliases(
+        &mut aliases,
+        "phoenix suns",
+        &["suns", "phx suns", "phoenix"],
+    );
     add_aliases(
         &mut aliases,
         "portland trail blazers",
-        &["trail blazers", "blazers", "por trail blazers"],
+        &["trail blazers", "blazers", "por trail blazers", "portland"],
     );
-    add_aliases(&mut aliases, "sacramento kings", &["kings", "sac kings"]);
-    add_aliases(&mut aliases, "san antonio spurs", &["spurs", "sa spurs"]);
-    add_aliases(&mut aliases, "toronto raptors", &["raptors", "tor raptors"]);
-    add_aliases(&mut aliases, "utah jazz", &["jazz", "uta jazz"]);
+    add_aliases(
+        &mut aliases,
+        "sacramento kings",
+        &["kings", "sac kings", "sacramento"],
+    );
+    add_aliases(
+        &mut aliases,
+        "san antonio spurs",
+        &["spurs", "sa spurs", "san antonio"],
+    );
+    add_aliases(
+        &mut aliases,
+        "toronto raptors",
+        &["raptors", "tor raptors", "toronto"],
+    );
+    add_aliases(
+        &mut aliases,
+        "utah jazz",
+        &["jazz", "uta jazz", "utah"],
+    );
     add_aliases(
         &mut aliases,
         "washington wizards",
-        &["wizards", "was wizards", "washington bullets"],
+        &["wizards", "was wizards", "washington bullets", "washington"],
     );
 
-    // NHL teams (abbreviated)
-    add_aliases(&mut aliases, "boston bruins", &["bruins", "bos bruins"]);
+    // NHL teams - Full roster with city-only aliases where unambiguous
+    // Note: Do NOT add city-only aliases for "new york" (Rangers vs Islanders) or "los angeles" (Kings vs NBA Lakers)
     add_aliases(
         &mut aliases,
-        "toronto maple leafs",
-        &["maple leafs", "leafs", "tor maple leafs"],
+        "anaheim ducks",
+        &["ducks", "ana ducks", "anaheim", "mighty ducks"],
     );
+    // Note: "boston" maps to Celtics (NBA) - don't add city-only alias
+    add_aliases(
+        &mut aliases,
+        "boston bruins",
+        &["bruins", "bos bruins"],
+    );
+    add_aliases(
+        &mut aliases,
+        "buffalo sabres",
+        &["sabres", "buf sabres", "buffalo"],
+    );
+    add_aliases(
+        &mut aliases,
+        "calgary flames",
+        &["flames", "cgy flames", "calgary"],
+    );
+    add_aliases(
+        &mut aliases,
+        "carolina hurricanes",
+        &["hurricanes", "canes", "car hurricanes", "carolina"],
+    );
+    // Note: "chicago" maps to Bulls (NBA) - don't add city-only alias
+    add_aliases(
+        &mut aliases,
+        "chicago blackhawks",
+        &["blackhawks", "hawks", "chi blackhawks"],
+    );
+    add_aliases(
+        &mut aliases,
+        "colorado avalanche",
+        &["avalanche", "avs", "col avalanche", "colorado"],
+    );
+    add_aliases(
+        &mut aliases,
+        "columbus blue jackets",
+        &["blue jackets", "cbj", "jackets", "columbus"],
+    );
+    // Note: "dallas" maps to Mavericks (NBA) - don't add city-only alias
+    add_aliases(
+        &mut aliases,
+        "dallas stars",
+        &["stars", "dal stars"],
+    );
+    // Note: "detroit" maps to Pistons (NBA) - don't add city-only alias
+    add_aliases(
+        &mut aliases,
+        "detroit red wings",
+        &["red wings", "wings", "det red wings"],
+    );
+    add_aliases(
+        &mut aliases,
+        "edmonton oilers",
+        &["oilers", "edm oilers", "edmonton"],
+    );
+    // Note: "panthers" conflicts with Carolina Panthers (NFL), "florida" is ambiguous
+    add_aliases(
+        &mut aliases,
+        "florida panthers",
+        &["fla panthers"],
+    );
+    // Note: Do NOT add "los angeles" - conflicts with NBA teams
+    add_aliases(
+        &mut aliases,
+        "los angeles kings",
+        &["kings", "la kings", "lak"],
+    );
+    // Note: "minnesota" maps to Timberwolves (NBA) - don't add city-only alias
+    add_aliases(
+        &mut aliases,
+        "minnesota wild",
+        &["wild", "min wild"],
+    );
+    add_aliases(
+        &mut aliases,
+        "montreal canadiens",
+        &["canadiens", "habs", "mtl canadiens", "montreal"],
+    );
+    add_aliases(
+        &mut aliases,
+        "nashville predators",
+        &["predators", "preds", "nsh predators", "nashville"],
+    );
+    add_aliases(
+        &mut aliases,
+        "new jersey devils",
+        &["devils", "nj devils", "njd", "new jersey"],
+    );
+    // Note: Do NOT add "new york" - conflicts with Rangers
+    add_aliases(
+        &mut aliases,
+        "new york islanders",
+        &["islanders", "isles", "ny islanders", "nyi"],
+    );
+    // Note: Do NOT add "new york" - conflicts with Islanders
+    // Note: "rangers" also conflicts with Texas Rangers (MLB) but context usually disambiguates
     add_aliases(
         &mut aliases,
         "new york rangers",
@@ -702,60 +859,88 @@ fn build_default_aliases() -> HashMap<String, String> {
     );
     add_aliases(
         &mut aliases,
-        "new york islanders",
-        &["islanders", "ny islanders", "nyi"],
+        "ottawa senators",
+        &["senators", "sens", "ott senators", "ottawa"],
     );
+    // Note: "philadelphia" maps to 76ers (NBA) - don't add city-only alias
     add_aliases(
         &mut aliases,
-        "montreal canadiens",
-        &["canadiens", "habs", "mtl canadiens"],
-    );
-    add_aliases(
-        &mut aliases,
-        "detroit red wings",
-        &["red wings", "det red wings"],
-    );
-    add_aliases(
-        &mut aliases,
-        "chicago blackhawks",
-        &["blackhawks", "chi blackhawks"],
+        "philadelphia flyers",
+        &["flyers", "phi flyers"],
     );
     add_aliases(
         &mut aliases,
         "pittsburgh penguins",
-        &["penguins", "pens", "pit penguins"],
+        &["penguins", "pens", "pit penguins", "pittsburgh"],
     );
     add_aliases(
         &mut aliases,
-        "washington capitals",
-        &["capitals", "caps", "was capitals"],
+        "san jose sharks",
+        &["sharks", "sj sharks", "sjs", "san jose"],
     );
     add_aliases(
         &mut aliases,
-        "colorado avalanche",
-        &["avalanche", "avs", "col avalanche"],
+        "seattle kraken",
+        &["kraken", "sea kraken", "seattle"],
+    );
+    add_aliases(
+        &mut aliases,
+        "st louis blues",
+        &[
+            "blues",
+            "stl blues",
+            "st. louis blues",
+            "saint louis blues",
+            "st louis",
+            "st. louis",
+            "saint louis",
+        ],
     );
     add_aliases(
         &mut aliases,
         "tampa bay lightning",
-        &["lightning", "bolts", "tb lightning"],
+        &["lightning", "bolts", "tb lightning", "tbl", "tampa bay", "tampa"],
+    );
+    // Note: "toronto" maps to Raptors (NBA) - don't add city-only alias
+    // Note: "toronto" maps to Raptors (NBA) - don't add city-only alias
+    add_aliases(
+        &mut aliases,
+        "toronto maple leafs",
+        &["maple leafs", "leafs", "tor maple leafs"],
+    );
+    // Utah Hockey Club -> Utah Mammoth (name change 2024-25 season)
+    // Note: "utah" maps to Jazz (NBA) - don't add city-only alias
+    add_aliases(
+        &mut aliases,
+        "utah mammoth",
+        &[
+            "mammoth",
+            "uta mammoth",
+            "utah hockey club",
+            "uhc",
+            "utah hc",
+        ],
     );
     add_aliases(
         &mut aliases,
-        "florida panthers",
-        &["panthers", "fla panthers"],
+        "vancouver canucks",
+        &["canucks", "van canucks", "vancouver"],
     );
     add_aliases(
         &mut aliases,
         "vegas golden knights",
-        &["golden knights", "vgk", "vegas knights"],
+        &["golden knights", "knights", "vgk", "vegas", "las vegas"],
     );
-    add_aliases(&mut aliases, "edmonton oilers", &["oilers", "edm oilers"]);
-    add_aliases(&mut aliases, "calgary flames", &["flames", "cgy flames"]);
+    // Note: "washington" maps to Wizards (NBA) - don't add city-only alias
     add_aliases(
         &mut aliases,
-        "vancouver canucks",
-        &["canucks", "van canucks"],
+        "washington capitals",
+        &["capitals", "caps", "wsh capitals", "was capitals"],
+    );
+    add_aliases(
+        &mut aliases,
+        "winnipeg jets",
+        &["jets", "wpg jets", "winnipeg"],
     );
 
     // MLB teams
@@ -799,7 +984,8 @@ fn build_default_aliases() -> HashMap<String, String> {
         "san francisco giants",
         &["giants", "sf giants"],
     );
-    add_aliases(&mut aliases, "texas rangers", &["rangers", "tex rangers"]);
+    // Note: "rangers" conflicts with NY Rangers (NHL) - use "tex rangers" for disambiguation
+    add_aliases(&mut aliases, "texas rangers", &["tex rangers"]);
     add_aliases(
         &mut aliases,
         "seattle mariners",
@@ -987,7 +1173,8 @@ fn build_default_aliases() -> HashMap<String, String> {
         "rutgers",
         &["rutgers scarlet knights", "scarlet knights"],
     );
-    add_college_aliases(&mut aliases, "ucla", &["ucla bruins", "bruins"]);
+    // Note: Do NOT include "bruins" as alias - conflicts with Boston Bruins (NHL)
+    add_college_aliases(&mut aliases, "ucla", &["ucla bruins"]);
     add_college_aliases(&mut aliases, "arizona", &["arizona wildcats"]);
     add_college_aliases(
         &mut aliases,
@@ -1056,8 +1243,11 @@ fn add_college_aliases(
     for variant in variants {
         map.insert(variant.to_string(), canonical_short.to_string());
     }
-    // Map canonical to itself
-    map.insert(canonical_short.to_string(), canonical_short.to_string());
+    // Map canonical to itself ONLY if not already mapped (avoid overwriting pro team aliases)
+    // e.g., don't overwrite "houston" -> "houston rockets" with "houston" -> "houston"
+    if !map.contains_key(canonical_short) {
+        map.insert(canonical_short.to_string(), canonical_short.to_string());
+    }
 }
 
 /// Parse team names from a match title string.
@@ -1393,4 +1583,162 @@ mod tests {
             ny_knicks
         );
     }
+
+    // =====================================================================
+    // NHL-specific normalization tests
+    // =====================================================================
+
+    #[test]
+    fn test_nhl_team_normalization_basic() {
+        let config = NormalizationConfig::default();
+
+        // Full names should normalize consistently
+        assert_eq!(
+            normalize_team_name("Boston Bruins", &config),
+            "boston bruins"
+        );
+        assert_eq!(
+            normalize_team_name("New York Rangers", &config),
+            "new york rangers"
+        );
+        assert_eq!(
+            normalize_team_name("New York Islanders", &config),
+            "new york islanders"
+        );
+        assert_eq!(
+            normalize_team_name("Toronto Maple Leafs", &config),
+            "toronto maple leafs"
+        );
+        assert_eq!(
+            normalize_team_name("Tampa Bay Lightning", &config),
+            "tampa bay lightning"
+        );
+    }
+
+    #[test]
+    fn test_nhl_team_normalization_aliases() {
+        let config = NormalizationConfig::default();
+
+        // Short names / nicknames should map to canonical forms
+        assert_eq!(normalize_team_name("Bruins", &config), "boston bruins");
+        assert_eq!(normalize_team_name("Rangers", &config), "new york rangers");
+        assert_eq!(
+            normalize_team_name("Islanders", &config),
+            "new york islanders"
+        );
+        assert_eq!(
+            normalize_team_name("Maple Leafs", &config),
+            "toronto maple leafs"
+        );
+        assert_eq!(normalize_team_name("Leafs", &config), "toronto maple leafs");
+        assert_eq!(
+            normalize_team_name("Lightning", &config),
+            "tampa bay lightning"
+        );
+        assert_eq!(normalize_team_name("Bolts", &config), "tampa bay lightning");
+        assert_eq!(
+            normalize_team_name("Golden Knights", &config),
+            "vegas golden knights"
+        );
+        assert_eq!(normalize_team_name("VGK", &config), "vegas golden knights");
+
+        // Canadiens / Habs
+        assert_eq!(
+            normalize_team_name("Canadiens", &config),
+            "montreal canadiens"
+        );
+        assert_eq!(normalize_team_name("Habs", &config), "montreal canadiens");
+    }
+
+    #[test]
+    fn test_nhl_st_louis_blues_normalization() {
+        let config = NormalizationConfig::default();
+
+        // Test various St. Louis Blues spellings normalize consistently
+        let expected = "st louis blues";
+        assert_eq!(normalize_team_name("St. Louis Blues", &config), expected);
+        assert_eq!(normalize_team_name("St Louis Blues", &config), expected);
+        assert_eq!(normalize_team_name("Saint Louis Blues", &config), expected);
+        assert_eq!(normalize_team_name("Blues", &config), expected);
+        assert_eq!(normalize_team_name("STL Blues", &config), expected);
+
+        // Just city names
+        assert_eq!(normalize_team_name("St. Louis", &config), expected);
+        assert_eq!(normalize_team_name("St Louis", &config), expected);
+        assert_eq!(normalize_team_name("Saint Louis", &config), expected);
+    }
+
+    #[test]
+    fn test_nhl_utah_mammoth_normalization() {
+        let config = NormalizationConfig::default();
+
+        // Utah Hockey Club -> Utah Mammoth (name change for 2024-25 season)
+        let expected = "utah mammoth";
+        assert_eq!(normalize_team_name("Utah Mammoth", &config), expected);
+        assert_eq!(normalize_team_name("Utah Hockey Club", &config), expected);
+        assert_eq!(normalize_team_name("Mammoth", &config), expected);
+        assert_eq!(normalize_team_name("UHC", &config), expected);
+    }
+
+    #[test]
+    fn test_nhl_city_only_aliases() {
+        let config = NormalizationConfig::default();
+
+        // Unambiguous city-only aliases (no cross-sport or cross-team conflicts)
+        assert_eq!(
+            normalize_team_name("Pittsburgh", &config),
+            "pittsburgh penguins"
+        );
+        assert_eq!(
+            normalize_team_name("Edmonton", &config),
+            "edmonton oilers"
+        );
+        assert_eq!(normalize_team_name("Calgary", &config), "calgary flames");
+        assert_eq!(
+            normalize_team_name("Vancouver", &config),
+            "vancouver canucks"
+        );
+        assert_eq!(normalize_team_name("Ottawa", &config), "ottawa senators");
+        assert_eq!(
+            normalize_team_name("Montreal", &config),
+            "montreal canadiens"
+        );
+        assert_eq!(normalize_team_name("Winnipeg", &config), "winnipeg jets");
+        assert_eq!(normalize_team_name("Nashville", &config), "nashville predators");
+        assert_eq!(normalize_team_name("Columbus", &config), "columbus blue jackets");
+        assert_eq!(normalize_team_name("Anaheim", &config), "anaheim ducks");
+        assert_eq!(normalize_team_name("San Jose", &config), "san jose sharks");
+        assert_eq!(normalize_team_name("New Jersey", &config), "new jersey devils");
+        assert_eq!(normalize_team_name("Seattle", &config), "seattle kraken");
+        assert_eq!(normalize_team_name("Vegas", &config), "vegas golden knights");
+        assert_eq!(normalize_team_name("Tampa Bay", &config), "tampa bay lightning");
+        assert_eq!(normalize_team_name("Tampa", &config), "tampa bay lightning");
+        assert_eq!(normalize_team_name("Carolina", &config), "carolina hurricanes");
+        assert_eq!(normalize_team_name("Colorado", &config), "colorado avalanche");
+        assert_eq!(normalize_team_name("Buffalo", &config), "buffalo sabres");
+    }
+
+    #[test]
+    fn test_nhl_matchup_key_generation() {
+        let config = NormalizationConfig::default();
+        let time = Utc.with_ymd_and_hms(2026, 1, 6, 0, 30, 0).unwrap();
+
+        // Same matchup from different formats should produce identical keys
+        let key_full = build_matchup_key("Boston Bruins", "Toronto Maple Leafs", &time, &config);
+        let key_nick = build_matchup_key("Bruins", "Leafs", &time, &config);
+        assert_eq!(key_full, key_nick, "Full names and nicknames should produce same key");
+
+        // NY Rangers vs NY Islanders - both use "new york" but different canonical names
+        let key_rangers_isles =
+            build_matchup_key("New York Rangers", "New York Islanders", &time, &config);
+        assert!(key_rangers_isles.contains("new york rangers"));
+        assert!(key_rangers_isles.contains("new york islanders"));
+
+        // Kalshi-style city names vs Polymarket full names
+        let key_kalshi = build_matchup_key("Pittsburgh", "Edmonton", &time, &config);
+        let key_poly =
+            build_matchup_key("Pittsburgh Penguins", "Edmonton Oilers", &time, &config);
+        assert_eq!(key_kalshi, key_poly, "City-only and full names should match");
+    }
 }
+

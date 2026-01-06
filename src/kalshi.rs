@@ -294,10 +294,7 @@ impl KalshiApiClient {
     pub async fn get_events(&self, series_ticker: &str, limit: u32) -> Result<Vec<KalshiEvent>> {
         // NOTE: Don't filter by status=open - it excludes same-day games that are
         // still tradeable. We'll filter by market status when processing instead.
-        let path = format!(
-            "/events?series_ticker={}&limit={}",
-            series_ticker, limit
-        );
+        let path = format!("/events?series_ticker={}&limit={}", series_ticker, limit);
         let resp: KalshiEventsResponse = self.get(&path).await?;
         Ok(resp.events)
     }

@@ -13,6 +13,13 @@
 //! - **join**: Joins Kalshi and Polymarket events into matched market pairs
 //! - **types**: Core data structures for discovery metadata
 //!
+//! ## Live Games Mode
+//!
+//! The `LIVE_GAMES_MODE` env var controls what "live" means:
+//! - `tradeable` (legacy): Any active/open market, including futures and awards
+//! - `window` (default): Games starting within a time window (tonight's slate)
+//! - `in_play`: Only games currently being played
+//!
 //! ## Usage
 //!
 //! ```ignore
@@ -38,11 +45,145 @@ pub use types::matched_markets_to_pairs;
 pub use types::*;
 
 use anyhow::Result;
+use chrono::{Duration, Utc};
 use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::kalshi::KalshiApiClient;
 use crate::polymarket::GammaClient;
+
+/// Live games filtering mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LiveGamesMode {
+    /// Legacy: Any active/open market (includes futures and awards)
+    Tradeable,
+    /// Games starting within a time window (tonight's slate) - DEFAULT
+    #[default]
+    Window,
+    /// Only games currently being played
+    InPlay,
+}
+
+impl LiveGamesMode {
+    /// Parse from environment variable string
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "tradeable" | "legacy" | "active" => LiveGamesMode::Tradeable,
+            "in_play" | "inplay" | "live" => LiveGamesMode::InPlay,
+            "window" | "tonight" | "slate" => LiveGamesMode::Window,
+            _ => LiveGamesMode::Window, // Default to window mode
+        }
+    }
+}
+
+/// Configuration for live games time window filtering
+#[derive(Debug, Clone)]
+pub struct LiveGamesConfig {
+    /// Filtering mode: tradeable, window, or in_play
+    pub mode: LiveGamesMode,
+    /// Hours to look back for games that already started (default: 6)
+    pub lookback_hours: u32,
+    /// Hours to look ahead for upcoming games (default: 12)
+    pub lookahead_hours: u32,
+    /// Minutes before game start to include (for in_play mode, default: 30)
+    pub pregame_minutes: u32,
+    /// Minutes after game end to include (for in_play mode, default: 60)
+    pub postgame_minutes: u32,
+}
+
+impl Default for LiveGamesConfig {
+    fn default() -> Self {
+        Self {
+            mode: LiveGamesMode::Window,
+            lookback_hours: 6,
+            lookahead_hours: 12,
+            pregame_minutes: 30,
+            postgame_minutes: 60,
+        }
+    }
+}
+
+impl LiveGamesConfig {
+    /// Load configuration from environment variables
+    pub fn from_env() -> Self {
+        let mode = std::env::var("LIVE_GAMES_MODE")
+            .map(|v| LiveGamesMode::from_str(&v))
+            .unwrap_or(LiveGamesMode::Window);
+
+        let lookback_hours = std::env::var("LIVE_GAMES_LOOKBACK_HOURS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(6);
+
+        let lookahead_hours = std::env::var("LIVE_GAMES_LOOKAHEAD_HOURS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(12);
+
+        let pregame_minutes = std::env::var("LIVE_GAMES_PREGAME_MINUTES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30);
+
+        let postgame_minutes = std::env::var("LIVE_GAMES_POSTGAME_MINUTES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60);
+
+        Self {
+            mode,
+            lookback_hours,
+            lookahead_hours,
+            pregame_minutes,
+            postgame_minutes,
+        }
+    }
+
+    /// Check if an event is within the configured time window
+    pub fn is_in_window(
+        &self,
+        start_time: Option<chrono::DateTime<Utc>>,
+        end_time: Option<chrono::DateTime<Utc>>,
+    ) -> bool {
+        let now = Utc::now();
+
+        match self.mode {
+            LiveGamesMode::Tradeable => true, // Accept all tradeable markets
+
+            LiveGamesMode::Window => {
+                // Event must start within [now - lookback, now + lookahead]
+                if let Some(start) = start_time {
+                    let window_start = now - Duration::hours(self.lookback_hours as i64);
+                    let window_end = now + Duration::hours(self.lookahead_hours as i64);
+                    start >= window_start && start <= window_end
+                } else {
+                    false // No start time = can't determine, exclude
+                }
+            }
+
+            LiveGamesMode::InPlay => {
+                // Event must be "live": between (start - pregame) and (end + postgame)
+                let pregame = Duration::minutes(self.pregame_minutes as i64);
+                let postgame = Duration::minutes(self.postgame_minutes as i64);
+
+                match (start_time, end_time) {
+                    (Some(start), Some(end)) => {
+                        let live_start = start - pregame;
+                        let live_end = end + postgame;
+                        now >= live_start && now <= live_end
+                    }
+                    (Some(start), None) => {
+                        // No end time: assume 3-hour duration for typical game
+                        let live_start = start - pregame;
+                        let live_end = start + Duration::hours(3) + postgame;
+                        now >= live_start && now <= live_end
+                    }
+                    _ => false, // No start time = exclude
+                }
+            }
+        }
+    }
+}
 
 /// Configuration for live discovery feature flags
 #[derive(Debug, Clone)]
@@ -55,6 +196,8 @@ pub struct LiveDiscoveryConfig {
     pub time_tolerance_hours: u32,
     /// Refresh interval for discovery in seconds (default: 300 = 5 min)
     pub refresh_interval_secs: u64,
+    /// Live games filtering configuration
+    pub live_games: LiveGamesConfig,
 }
 
 impl Default for LiveDiscoveryConfig {
@@ -64,6 +207,7 @@ impl Default for LiveDiscoveryConfig {
             fallback_slug_map: false,
             time_tolerance_hours: 6,
             refresh_interval_secs: 300,
+            live_games: LiveGamesConfig::default(),
         }
     }
 }
@@ -89,11 +233,14 @@ impl LiveDiscoveryConfig {
             .and_then(|s| s.parse().ok())
             .unwrap_or(300);
 
+        let live_games = LiveGamesConfig::from_env();
+
         Self {
             live_join_enabled,
             fallback_slug_map,
             time_tolerance_hours,
             refresh_interval_secs,
+            live_games,
         }
     }
 }
@@ -140,8 +287,12 @@ impl LiveDiscoveryEngine {
         info!(
             event = "live_discovery_start",
             league = %league_spec.league_code,
-            "Starting live discovery for {}",
-            league_spec.league_code
+            mode = ?self.config.live_games.mode,
+            lookback_hours = self.config.live_games.lookback_hours,
+            lookahead_hours = self.config.live_games.lookahead_hours,
+            "Starting live discovery for {} (mode={:?})",
+            league_spec.league_code,
+            self.config.live_games.mode
         );
 
         // Step 1: Discover Kalshi events
@@ -149,6 +300,7 @@ impl LiveDiscoveryEngine {
             series_tickers: league_spec.kalshi_series_tickers.clone(),
             status_filter: "open".to_string(),
             limit_per_series: 100,
+            live_games: self.config.live_games.clone(),
         };
 
         let kalshi_events = discover_kalshi_events(&self.kalshi, &kalshi_config).await?;
@@ -157,7 +309,7 @@ impl LiveDiscoveryEngine {
             event = "discovery_kalshi_open_events_count",
             count = kalshi_events.len(),
             league = %league_spec.league_code,
-            "Discovered {} Kalshi open events",
+            "Discovered {} Kalshi game events (after filtering)",
             kalshi_events.len()
         );
 
@@ -167,6 +319,7 @@ impl LiveDiscoveryEngine {
             series_slug_prefix: league_spec.polymarket_slug_prefix.clone(),
             active_only: true,
             closed_filter: false,
+            live_games: self.config.live_games.clone(),
         };
 
         let poly_events = discover_poly_events(&self.gamma, &poly_config).await?;

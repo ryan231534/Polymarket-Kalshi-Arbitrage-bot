@@ -2,8 +2,13 @@
 //!
 //! This module handles discovering open/live Kalshi events and markets
 //! for sports leagues using the Kalshi REST API.
+//!
+//! ## Live Games Filtering
+//!
+//! When `LIVE_GAMES_MODE` is set to "window" or "in_play", this module filters
+//! events to only include actual games within the configured time window.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -11,8 +16,9 @@ use tracing::{debug, info, warn};
 use crate::kalshi::KalshiApiClient;
 use crate::types::{KalshiEvent, KalshiMarket};
 
-use super::normalize::{parse_teams_from_title, NormalizationConfig};
+use super::normalize::parse_teams_from_title;
 use super::types::{KalshiEventMeta, KalshiMarketMeta, LiveMarketType};
+use super::{LiveGamesConfig, LiveGamesMode};
 
 /// Configuration for Kalshi discovery
 #[derive(Debug, Clone)]
@@ -23,6 +29,8 @@ pub struct KalshiDiscoveryConfig {
     pub status_filter: String,
     /// Maximum events per series
     pub limit_per_series: u32,
+    /// Live games filtering configuration
+    pub live_games: LiveGamesConfig,
 }
 
 impl Default for KalshiDiscoveryConfig {
@@ -31,6 +39,7 @@ impl Default for KalshiDiscoveryConfig {
             series_tickers: vec![],
             status_filter: "open".to_string(),
             limit_per_series: 100,
+            live_games: LiveGamesConfig::default(),
         }
     }
 }
@@ -39,11 +48,26 @@ impl Default for KalshiDiscoveryConfig {
 ///
 /// Queries multiple series tickers and fetches event details including
 /// all markets within each event.
+///
+/// ## Filtering Pipeline
+///
+/// 1. Fetch events for each series ticker
+/// 2. Filter to events with active markets
+/// 3. Filter to "game-only" events (can parse teams + start time)
+/// 4. Apply time window filter based on LIVE_GAMES_MODE
 pub async fn discover_kalshi_events(
     client: &Arc<KalshiApiClient>,
     config: &KalshiDiscoveryConfig,
 ) -> Result<Vec<KalshiEventMeta>> {
     let mut all_events = Vec::new();
+
+    // Track filtering stats
+    let mut total_events = 0;
+    let mut after_active_filter = 0;
+    let mut excluded_no_teams = 0;
+    let mut excluded_no_time = 0;
+    let mut excluded_time_window = 0;
+    let mut exclusion_samples: Vec<(String, String)> = Vec::new();
 
     for series_ticker in &config.series_tickers {
         debug!("Discovering Kalshi events for series: {}", series_ticker);
@@ -68,6 +92,7 @@ pub async fn discover_kalshi_events(
             events.len(),
             series_ticker
         );
+        total_events += events.len();
 
         // Process each event
         for event in events {
@@ -91,14 +116,68 @@ pub async fn discover_kalshi_events(
 
             // Skip events with no active markets
             if active_markets.is_empty() {
-                debug!(
-                    "Skipping event {} - no active markets",
-                    event.event_ticker
-                );
+                debug!("Skipping event {} - no active markets", event.event_ticker);
                 continue;
             }
 
-            // Parse event metadata
+            after_active_filter += 1;
+
+            // === GAME-ONLY FILTER (when not in tradeable mode) ===
+            if config.live_games.mode != LiveGamesMode::Tradeable {
+                // 1. Must be able to parse teams from title or ticker
+                let has_teams = parse_teams_from_title(&event.title).is_some()
+                    || parse_teams_from_ticker(&event.event_ticker).is_some();
+
+                if !has_teams {
+                    excluded_no_teams += 1;
+                    if exclusion_samples.len() < 5 {
+                        exclusion_samples
+                            .push((event.event_ticker.clone(), "no teams parsed".to_string()));
+                    }
+                    continue;
+                }
+
+                // 2. Determine start time and end time
+                // Use expected_expiration_time from first market as end time
+                let end_time = active_markets
+                    .first()
+                    .and_then(|m| m.expected_expiration_time.as_ref())
+                    .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                // Estimate start time based on league duration
+                // NBA/NHL: ~2.5 hours, NFL: ~3.5 hours, MLB: ~3 hours
+                let estimated_duration = estimate_game_duration(series_ticker);
+                let start_time = end_time
+                    .map(|et| et - estimated_duration)
+                    .or_else(|| parse_start_time_from_ticker(&event.event_ticker));
+
+                if start_time.is_none() {
+                    excluded_no_time += 1;
+                    if exclusion_samples.len() < 5 {
+                        exclusion_samples.push((
+                            event.event_ticker.clone(),
+                            "cannot determine start time".to_string(),
+                        ));
+                    }
+                    continue;
+                }
+
+                // 3. Apply time window filter
+                if !config.live_games.is_in_window(start_time, end_time) {
+                    excluded_time_window += 1;
+                    if exclusion_samples.len() < 5 {
+                        let reason = match start_time {
+                            Some(st) => format!("outside time window (starts {})", st),
+                            None => "outside time window".to_string(),
+                        };
+                        exclusion_samples.push((event.event_ticker.clone(), reason));
+                    }
+                    continue;
+                }
+            }
+
+            // Parse event metadata (includes start_time calculation)
             let event_meta = parse_kalshi_event(&event, &active_markets, series_ticker);
             all_events.push(event_meta);
         }
@@ -107,7 +186,41 @@ pub async fn discover_kalshi_events(
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 
+    // Log filtering summary
+    let final_count = all_events.len();
+    info!(
+        "Kalshi filtering: {} total -> {} with active markets -> {} games ({} no teams, {} no time, {} outside window)",
+        total_events, after_active_filter, final_count,
+        excluded_no_teams, excluded_no_time, excluded_time_window
+    );
+
+    // Log sample exclusions
+    if !exclusion_samples.is_empty() {
+        warn!("Sample excluded Kalshi events:");
+        for (ticker, reason) in exclusion_samples.iter().take(5) {
+            warn!("  - {} | {}", ticker, reason);
+        }
+    }
+
     Ok(all_events)
+}
+
+/// Estimate game duration based on league/series
+fn estimate_game_duration(series_ticker: &str) -> chrono::Duration {
+    let upper = series_ticker.to_uppercase();
+    if upper.contains("NFL") || upper.contains("NCAAF") {
+        chrono::Duration::hours(3) + chrono::Duration::minutes(30)
+    } else if upper.contains("NBA") || upper.contains("NCAAMB") || upper.contains("NCAAWB") {
+        chrono::Duration::hours(2) + chrono::Duration::minutes(30)
+    } else if upper.contains("NHL") {
+        chrono::Duration::hours(2) + chrono::Duration::minutes(45)
+    } else if upper.contains("MLB") {
+        chrono::Duration::hours(3)
+    } else if upper.contains("EPL") || upper.contains("MLS") || upper.contains("SOCCER") {
+        chrono::Duration::hours(2) // 90 min + halftime + stoppage
+    } else {
+        chrono::Duration::hours(3) // Default
+    }
 }
 
 /// Parse a Kalshi event and its markets into our metadata format
@@ -116,19 +229,34 @@ fn parse_kalshi_event(
     markets: &[KalshiMarket],
     series_ticker: &str,
 ) -> KalshiEventMeta {
-    // Try to get start time from market's expected_expiration_time first (most accurate)
-    // The expected_expiration_time is when the game ends, so we subtract ~2.5 hours for start
-    let start_time = markets
+    // Get end time from market's expected_expiration_time (most accurate)
+    let end_time = markets
         .first()
         .and_then(|m| m.expected_expiration_time.as_ref())
         .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
-        .map(|dt| dt.with_timezone(&Utc) - chrono::Duration::hours(2))
+        .map(|dt| dt.with_timezone(&Utc));
+
+    // Estimate start time based on end time and league duration
+    let estimated_duration = estimate_game_duration(series_ticker);
+    let start_time = end_time
+        .map(|et| et - estimated_duration)
         .or_else(|| parse_start_time_from_ticker(&event.event_ticker));
 
-    // Parse team names from title
+    // Parse team names from title first
     let (home_team, away_team) = parse_teams_from_title(&event.title)
         .map(|(a, b)| (Some(b), Some(a))) // Convert to (home, away) - typically second team is home
-        .unwrap_or((None, None));
+        .unwrap_or_else(|| {
+            // Fallback: parse from ticker codes and convert to team names
+            // This is especially useful for NHL where titles may be inconsistent
+            if let Some((code1, code2)) = parse_teams_from_ticker(&event.event_ticker) {
+                let team1 = kalshi_code_to_team_name(&code1).map(|s| s.to_lowercase());
+                let team2 = kalshi_code_to_team_name(&code2).map(|s| s.to_lowercase());
+                // In ticker format, first team is usually away, second is home
+                (team2, team1)
+            } else {
+                (None, None)
+            }
+        });
 
     // Parse markets
     let market_metas: Vec<KalshiMarketMeta> = markets
@@ -299,21 +427,39 @@ pub fn kalshi_code_to_team_name(code: &str) -> Option<String> {
         "SAS" | "SA" => "San Antonio Spurs",
         "TOR" => "Toronto Raptors",
         "UTA" => "Utah Jazz",
-        // NHL
+        // NHL - Complete roster with standard abbreviations
+        // Reference: https://en.wikipedia.org/wiki/Template:NHL_team_abbreviations
         "ANA" => "Anaheim Ducks",
+        "BOS_NHL" => "Boston Bruins", // Disambiguate from Celtics if needed
+        "BUF_NHL" => "Buffalo Sabres", // Disambiguate from Bills if needed
         "CGY" => "Calgary Flames",
+        "CAR_NHL" => "Carolina Hurricanes", // Disambiguate from Panthers NFL
+        "CHI_NHL" => "Chicago Blackhawks", // Disambiguate from Bears/Bulls
         "COL" => "Colorado Avalanche",
         "CBJ" => "Columbus Blue Jackets",
+        "DAL_NHL" => "Dallas Stars", // Disambiguate from Cowboys
+        "DET_NHL" => "Detroit Red Wings", // Disambiguate from Lions/Pistons
         "EDM" => "Edmonton Oilers",
         "FLA" => "Florida Panthers",
+        "LAK" => "Los Angeles Kings",
+        "MIN_NHL" => "Minnesota Wild", // Disambiguate from Vikings/Timberwolves
         "MTL" => "Montreal Canadiens",
+        "NSH" => "Nashville Predators",
         "NJ" | "NJD" => "New Jersey Devils",
         "NYI" => "New York Islanders",
         "NYR" => "New York Rangers",
         "OTT" => "Ottawa Senators",
+        "PHI_NHL" => "Philadelphia Flyers", // Disambiguate from Eagles/76ers
+        "PIT_NHL" => "Pittsburgh Penguins", // Disambiguate from Steelers
+        "SJS" | "SJ" => "San Jose Sharks",
+        "SEA_NHL" => "Seattle Kraken", // Disambiguate from Seahawks/Mariners
         "STL" => "St. Louis Blues",
+        "TBL" | "TB_NHL" => "Tampa Bay Lightning", // Disambiguate from Buccaneers
+        "TOR_NHL" => "Toronto Maple Leafs", // Disambiguate from Raptors
+        "UHC" | "UTA_NHL" => "Utah Mammoth", // Utah Hockey Club -> Utah Mammoth
         "VAN" => "Vancouver Canucks",
         "VGK" | "VEG" => "Vegas Golden Knights",
+        "WSH_NHL" | "WAS_NHL" => "Washington Capitals", // Disambiguate from Commanders/Wizards
         "WPG" => "Winnipeg Jets",
         // MLB (abbreviated)
         "TEX" => "Texas Rangers",
@@ -361,6 +507,119 @@ mod tests {
             Some("Los Angeles Lakers".to_string())
         );
         assert!(kalshi_code_to_team_name("XXX").is_none());
+    }
+
+    #[test]
+    fn test_kalshi_code_to_team_name_nhl() {
+        // LA Kings = LAK (not LA, which is Rams)
+        assert_eq!(
+            kalshi_code_to_team_name("LAK"),
+            Some("Los Angeles Kings".to_string())
+        );
+
+        // Tampa Bay Lightning = TBL
+        assert_eq!(
+            kalshi_code_to_team_name("TBL"),
+            Some("Tampa Bay Lightning".to_string())
+        );
+
+        // San Jose Sharks = SJS
+        assert_eq!(
+            kalshi_code_to_team_name("SJS"),
+            Some("San Jose Sharks".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("SJ"),
+            Some("San Jose Sharks".to_string())
+        );
+
+        // New Jersey Devils = NJD
+        assert_eq!(
+            kalshi_code_to_team_name("NJD"),
+            Some("New Jersey Devils".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("NJ"),
+            Some("New Jersey Devils".to_string())
+        );
+
+        // Vegas Golden Knights = VGK
+        assert_eq!(
+            kalshi_code_to_team_name("VGK"),
+            Some("Vegas Golden Knights".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("VEG"),
+            Some("Vegas Golden Knights".to_string())
+        );
+
+        // St. Louis Blues = STL
+        assert_eq!(
+            kalshi_code_to_team_name("STL"),
+            Some("St. Louis Blues".to_string())
+        );
+
+        // Utah Mammoth = UHC (Utah Hockey Club) or UTA_NHL
+        assert_eq!(
+            kalshi_code_to_team_name("UHC"),
+            Some("Utah Mammoth".to_string())
+        );
+
+        // NY Rangers vs NY Islanders
+        assert_eq!(
+            kalshi_code_to_team_name("NYR"),
+            Some("New York Rangers".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("NYI"),
+            Some("New York Islanders".to_string())
+        );
+
+        // Other common NHL codes
+        assert_eq!(
+            kalshi_code_to_team_name("MTL"),
+            Some("Montreal Canadiens".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("ANA"),
+            Some("Anaheim Ducks".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("CGY"),
+            Some("Calgary Flames".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("EDM"),
+            Some("Edmonton Oilers".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("WPG"),
+            Some("Winnipeg Jets".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("OTT"),
+            Some("Ottawa Senators".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("VAN"),
+            Some("Vancouver Canucks".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("NSH"),
+            Some("Nashville Predators".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("CBJ"),
+            Some("Columbus Blue Jackets".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("FLA"),
+            Some("Florida Panthers".to_string())
+        );
+        assert_eq!(
+            kalshi_code_to_team_name("COL"),
+            Some("Colorado Avalanche".to_string())
+        );
     }
 
     use chrono::Datelike;
