@@ -11,3 +11,12 @@ positions.json
 logs/
 data/pnl_snapshot.json
 data/pnl_events.jsonl
+
+# Trading edge - keep private
+src/live_discovery/normalize.rs
+src/live_discovery/kalshi_discovery.rs
+.env
+*.env
+kalshi_private_key.txt
+kalshi_team_cache.json
+
